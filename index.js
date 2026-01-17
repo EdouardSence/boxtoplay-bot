@@ -36,7 +36,6 @@ app.listen(PORT, () => {
 
 async function getSessionCookie() {
     try {
-        // On récupère le JSON brut depuis le Gist
         const response = await axios.get(`https://api.github.com/gists/${GIST_ID}`, {
             headers: {
                 'Authorization': `token ${GH_TOKEN}`,
@@ -44,14 +43,27 @@ async function getSessionCookie() {
             }
         });
 
-        const gistContent = JSON.parse(response.data.files['boxtoplay_state.json'].content);
+        // --- CORRECTION ICI ---
+        // On récupère la liste des fichiers du Gist
+        const files = response.data.files;
 
-        // On identifie quel compte est actif
+        // On prend le premier nom de fichier trouvé (peu importe son nom)
+        const firstFileName = Object.keys(files)[0];
+
+        if (!firstFileName) {
+            console.error("❌ Erreur : Le Gist semble vide (aucun fichier trouvé).");
+            return null;
+        }
+
+        console.log(`📂 Lecture du fichier : ${firstFileName}`); // Log pour debug
+        const rawContent = files[firstFileName].content;
+        const gistContent = JSON.parse(rawContent);
+        // ----------------------
+
         const activeIndex = gistContent.active_account_index;
         const activeAccount = gistContent.accounts[activeIndex];
         const serverId = gistContent.current_server_id;
 
-        // On retourne le cookie et l'ID du serveur
         return {
             cookie: activeAccount.cookies['BOXTOPLAY_SESSION'],
             serverId: serverId,
@@ -60,6 +72,10 @@ async function getSessionCookie() {
 
     } catch (error) {
         console.error("❌ Erreur lecture Gist:", error.message);
+        // Affiche plus de détails si c'est une erreur API
+        if (error.response) {
+            console.error("Détail API:", error.response.data);
+        }
         return null;
     }
 }
