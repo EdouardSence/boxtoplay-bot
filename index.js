@@ -122,9 +122,9 @@ async function updatePresence() {
         let statusText = "🔴 Serveur éteint";
 
         if (s.online) {
-            statusText = `🟢 ${s.players.online}/${s.players.max} | 👥 ${data.email.split('@')[0]}`;
+            statusText = `🟢 ${s.players.online}/${s.players.max} `;
         } else {
-            statusText = `🔴 Serveur éteint | 👥 ${data.email.split('@')[0]}`;
+            statusText = `🔴 Serveur éteint`;
         }
 
         client.user.setActivity(statusText);
