@@ -1,11 +1,11 @@
 // ==========================================
 // CONFIGURATION & DEPENDANCES
 // ==========================================
-const { Client, GatewayIntentBits, Partials, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
 const express = require('express');
 
-// Récupération des secrets via les variables d'environnement (Render)
+// Secrets
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GIST_ID = process.env.GIST_ID;
@@ -18,24 +18,21 @@ const IP_DNS = process.env.IP_DNS || 'orny';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.send('🤖 Bot BoxToPlay est en ligne !');
-});
+app.get('/', (req, res) => res.send('🤖 Bot BoxToPlay - Multi-Account Keeper'));
+app.get('/keep-alive', (req, res) => res.status(200).send('Ping reçu !'));
 
-// Route spéciale pour Cron-job.org
-app.get('/keep-alive', (req, res) => {
-    res.status(200).send('Ping reçu !');
-});
-
-app.listen(PORT, () => {
-    console.log(`🌍 Serveur Web écoute sur le port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🌍 Serveur Web écoute sur le port ${PORT}`));
 
 // ==========================================
-// 2. GESTION GIST & COOKIES
+// 2. GESTION GIST & ETAT LOCAL
 // ==========================================
 
-async function getSessionCookie() {
+// Variable globale pour stocker l'état en mémoire
+let LOCAL_STATE = null;
+let GIST_FILENAME = null;
+
+// Initialisation : On charge le Gist au démarrage
+async function initGist() {
     try {
         const response = await axios.get(`https://api.github.com/gists/${GIST_ID}`, {
             headers: {
@@ -43,135 +40,173 @@ async function getSessionCookie() {
                 'Accept': 'application/vnd.github.v3+json'
             }
         });
-
         const files = response.data.files;
-        // On prend le premier fichier trouvé, peu importe son nom (boxtoplay.json ou autre)
-        const firstFileName = Object.keys(files)[0];
+        GIST_FILENAME = Object.keys(files)[0]; // Trouve le nom du fichier dynamiquement
 
-        if (!firstFileName) {
-            console.error("❌ Erreur : Le Gist est vide.");
-            return null;
-        }
+        if (!GIST_FILENAME) throw new Error("Gist vide");
 
-        console.log(`📂 Lecture du fichier : ${firstFileName}`);
+        LOCAL_STATE = JSON.parse(files[GIST_FILENAME].content);
+        console.log("✅ État initial chargé depuis le Gist.");
 
-        // C'est ici que ça plantait avant : on utilise firstFileName dynamiquement
-        const rawContent = files[firstFileName].content;
-        const gistContent = JSON.parse(rawContent);
-
-        const activeIndex = gistContent.active_account_index;
-        const activeAccount = gistContent.accounts[activeIndex];
-        const serverId = gistContent.current_server_id;
-
-        return {
-            cookie: activeAccount.cookies['BOXTOPLAY_SESSION'],
-            serverId: serverId,
-            email: activeAccount.email
-        };
+        // On lance un premier refresh immédiat
+        refreshAllSessions();
 
     } catch (error) {
-        console.error("❌ Erreur lecture Gist:", error.message);
-        return null;
+        console.error("❌ Erreur initGist:", error.message);
+        process.exit(1); // Si on ne peut pas charger l'état, le bot ne sert à rien
+    }
+}
+
+// Sauvegarde l'état mémoire vers le Gist
+async function saveStateToGist() {
+    if (!LOCAL_STATE || !GIST_FILENAME) return;
+    try {
+        console.log("💾 Sauvegarde de l'état dans le Gist...");
+        await axios.patch(`https://api.github.com/gists/${GIST_ID}`, {
+            files: {
+                [GIST_FILENAME]: { content: JSON.stringify(LOCAL_STATE, null, 4) }
+            }
+        }, {
+            headers: { 'Authorization': `token ${GH_TOKEN}` }
+        });
+        console.log("✅ Gist mis à jour avec succès.");
+    } catch (error) {
+        console.error("❌ Erreur saveStateToGist:", error.message);
     }
 }
 
 // ==========================================
-// 3. LOGIQUE DISCORD
+// 3. LOGIQUE KEEP-ALIVE (LES DEUX COMPTES)
 // ==========================================
 
-const client = new Client({
-    intents: [GatewayIntentBits.Guilds],
-});
+async function pingAccount(account, index) {
+    const currentCookie = account.cookies['BOXTOPLAY_SESSION'];
 
-// Commandes Slash
+    if (!currentCookie) {
+        console.log(`⚠️ Compte ${account.email} : Pas de cookie.`);
+        return false; // Pas de changement
+    }
+
+    try {
+        // Requête légère pour maintenir la session
+        const response = await axios.get('https://www.boxtoplay.com/panel', {
+            headers: {
+                'Cookie': `BOXTOPLAY_SESSION=${currentCookie}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            },
+            maxRedirects: 5,
+            validateStatus: status => status < 500
+        });
+
+        // Vérification si le serveur nous donne un nouveau cookie
+        const setCookieHeader = response.headers['set-cookie'];
+        if (setCookieHeader) {
+            const newSession = setCookieHeader.find(c => c.startsWith('BOXTOPLAY_SESSION'));
+            if (newSession) {
+                const newVal = newSession.split(';')[0].split('=')[1];
+                if (newVal !== currentCookie) {
+                    console.log(`🔄 Compte ${account.email} : Nouveau cookie reçu !`);
+                    // Mise à jour de l'état local
+                    LOCAL_STATE.accounts[index].cookies['BOXTOPLAY_SESSION'] = newVal;
+                    return true; // Changement détecté !
+                }
+            }
+        }
+        console.log(`💓 Compte ${account.email} : Session OK.`);
+        return false; // Pas de changement
+
+    } catch (error) {
+        console.error(`❌ Erreur ping ${account.email}:`, error.message);
+        return false;
+    }
+}
+
+async function refreshAllSessions() {
+    if (!LOCAL_STATE) return;
+
+    console.log("--- 🔄 Vérification des sessions (Tout le monde) ---");
+    let somethingChanged = false;
+
+    // On utilise Promise.all pour pinger les deux comptes en parallèle
+    const results = await Promise.all(LOCAL_STATE.accounts.map((acc, index) => pingAccount(acc, index)));
+
+    // Si au moins un compte a reçu un nouveau cookie
+    if (results.includes(true)) {
+        somethingChanged = true;
+    }
+
+    // Sauvegarde conditionnelle
+    if (somethingChanged) {
+        await saveStateToGist();
+    } else {
+        // Optionnel : Forcer une sauvegarde toutes les X heures si tu veux vraiment
+        // Mais techniquement inutile si le cookie n'a pas changé
+        console.log("--- ✅ Aucune modification de cookie nécessaire ---");
+    }
+}
+
+// ==========================================
+// 4. LOGIQUE DISCORD
+// ==========================================
+
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const commands = [
-    new SlashCommandBuilder().setName('info').setDescription('Affiche l\'état du serveur'),
-    new SlashCommandBuilder().setName('list').setDescription('Affiche les joueurs connectés')
-].map(command => command.toJSON());
+    new SlashCommandBuilder().setName('info').setDescription('Infos session'),
+    new SlashCommandBuilder().setName('list').setDescription('Joueurs en ligne'),
+    new SlashCommandBuilder().setName('force_save').setDescription('Force la sauvegarde Gist')
+].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// Enregistrement des commandes au démarrage
 (async () => {
     try {
-        console.log('🔄 Refresh des commandes slash...');
         await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-        console.log('✅ Commandes enregistrées.');
-    } catch (error) {
-        console.error(error);
-    }
+        console.log('✅ Commandes slash OK.');
+    } catch (e) { console.error(e); }
 })();
 
-// Fonction principale de mise à jour du statut
 async function updatePresence() {
-    const data = await getSessionCookie();
-
-    if (!data || !data.cookie) {
-        // Pas de cookie trouvé dans le Gist
-        client.user.setActivity("🔴 En attente de cookie...");
-        console.log("⚠️ Cookie manquant dans le Gist. Le bot attend la mise à jour ou l'ajout manuel.");
-        return;
-    }
-
     try {
-        // Appel API externe pour avoir le statut (plus fiable que de scraper BoxToPlay sans cesse)
-        const statsUrl = `https://api.mcsrvstat.us/3/${IP_DNS}.boxtoplay.com`;
-        const statsRes = await axios.get(statsUrl);
-        const s = statsRes.data;
-
-        let statusText = "🔴 Serveur éteint";
-
-        if (s.online) {
-            statusText = `🟢 ${s.players.online}/${s.players.max} `;
-        } else {
-            statusText = `🔴 Serveur éteint`;
-        }
-
-        client.user.setActivity(statusText);
-        console.log(`✅ Statut mis à jour : ${statusText}`);
-
-    } catch (error) {
-        console.error("Erreur update presence:", error.message);
-    }
+        const stats = await axios.get(`https://api.mcsrvstat.us/3/${IP_DNS}.boxtoplay.com`);
+        const s = stats.data;
+        let status = "🔴 Serveur OFF";
+        if (s.online) status = `🟢 ${s.players.online}/${s.players.max} Joueurs`;
+        client.user.setActivity(status);
+    } catch (e) { console.error("Erreur Presence:", e.message); }
 }
 
 client.once('ready', () => {
-    console.log(`🤖 Connecté en tant que ${client.user.tag}`);
+    console.log(`🤖 Connecté: ${client.user.tag}`);
 
-    updatePresence();
-    setInterval(updatePresence, 60000); // Mise à jour toutes les minutes
+    // 1. Initialisation unique
+    initGist();
+
+    // 2. Tâches périodiques
+    setInterval(updatePresence, 60000); // Discord Statut (1 min)
+    setInterval(refreshAllSessions, 5 * 60 * 1000); // Ping des DEUX comptes (5 min)
 });
 
-// Gestion des intéractions
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'info') {
-        const data = await getSessionCookie();
-        const serverMsg = data && data.serverId ? `Serveur ID: ${data.serverId}` : "Serveur ID: Inconnu";
-        const emailMsg = data && data.email ? `Compte: ${data.email}` : "Compte: Inconnu";
-        await interaction.reply(`ℹ️ **Infos Bot**\n${emailMsg}\n${serverMsg}\nDNS: ${IP_DNS}.boxtoplay.com`);
-    }
-
     if (interaction.commandName === 'list') {
         try {
-            const response = await axios.get(`https://api.mcsrvstat.us/3/${IP_DNS}.boxtoplay.com`);
-            const json = response.data;
+            const r = await axios.get(`https://api.mcsrvstat.us/3/${IP_DNS}.boxtoplay.com`);
+            if (!r.data.online) return interaction.reply("🔴 Serveur éteint.");
+            const list = r.data.players.list ? r.data.players.list.map(p => p.name).join(', ') : "Personne";
+            interaction.reply(`Joueurs : ${list}`);
+        } catch (e) { interaction.reply("Erreur info."); }
+    }
 
-            if (!json.online) {
-                await interaction.reply("🔴 Le serveur est éteint ou inaccessible.");
-            } else {
-                if (!json.players || json.players.online === 0) {
-                    await interaction.reply("👻 Il n'y a personne sur le serveur.");
-                } else {
-                    const playersList = json.players.list.map(p => `**${p.name}**`).join('\n');
-                    await interaction.reply(`🟢 **Joueurs en ligne (${json.players.online})** :\n${playersList}`);
-                }
-            }
-        } catch (error) {
-            console.error(error);
-            await interaction.reply("❌ Erreur lors de la récupération de la liste.");
-        }
+    if (interaction.commandName === 'info') {
+        if (!LOCAL_STATE) return interaction.reply("État non chargé.");
+        const active = LOCAL_STATE.accounts[LOCAL_STATE.active_account_index];
+        interaction.reply(`Compte actif: ${active.email}\nServeur: ${LOCAL_STATE.current_server_id}\nCookies maintenus: ${LOCAL_STATE.accounts.length}`);
+    }
+
+    if (interaction.commandName === 'force_save') {
+        await saveStateToGist();
+        interaction.reply("💾 Sauvegarde forcée vers le Gist effectuée.");
     }
 });
 
