@@ -14,11 +14,18 @@ const IP_DNS = process.env.IP_DNS || 'orny';
 
 // Headers pour passer le 403 (Copie d'un navigateur réel)
 const BROWSER_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
     'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Referer': 'https://www.boxtoplay.com/panel',
-    'Origin': 'https://www.boxtoplay.com'
+    'Origin': 'https://www.boxtoplay.com',
+    'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Dest': 'document'
 };
 
 // ==========================================
@@ -74,11 +81,12 @@ async function saveToGist() {
 // Helper pour formater le cookie correctement
 function formatCookie(cookieValue) {
     if (!cookieValue) return "";
-    // Si le cookie contient déjà "BOXTOPLAY_SESSION=", on le laisse tel quel
-    if (cookieValue.includes("BOXTOPLAY_SESSION=")) {
+    // S'il y a déjà un '=', on suppose que c'est une chaîne de cookies formatée
+    // (ex: cf_clearance=...; BOXTOPLAY_SESSION=...)
+    if (cookieValue.includes("=")) {
         return cookieValue;
     }
-    // Sinon on ajoute le préfixe
+    // Pour la rétrocompatibilité si la valeur est juste le token brut
     return `BOXTOPLAY_SESSION=${cookieValue}`;
 }
 
@@ -163,7 +171,21 @@ async function checkAccount(account, index) {
             url = `https://www.boxtoplay.com/minecraft/getStatus/${LOCAL_STATE.current_server_id}`;
         }
 
-        const res = await clientAxios.get(url);
+        const res = await clientAxios.get(url, {
+            headers: url.includes('getStatus') ? {
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'X-Requested-With': 'XMLHttpRequest'
+            } : {
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1'
+            }
+        });
 
         if (res.status === 403) {
             console.error(`❌ 403 Forbidden pour ${account.email} (Problème Headers/IP)`);
