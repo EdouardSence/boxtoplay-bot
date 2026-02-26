@@ -5,7 +5,11 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
 const { execSync } = require('child_process');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const express = require('express');
+
+puppeteer.use(StealthPlugin());
 
 // Secrets
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -14,28 +18,28 @@ const GIST_ID = process.env.GIST_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const IP_DNS = process.env.IP_DNS || 'orny';
 
-// Headers pour passer le 403 (Copie d'un navigateur réel)
+// User-Agent cohérent entre Puppeteer et curl
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// Headers pour curl
 const BROWSER_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+    'User-Agent': USER_AGENT,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://www.boxtoplay.com/panel',
-    'Origin': 'https://www.boxtoplay.com',
     'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
     'Sec-Ch-Ua-Mobile': '?0',
     'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Dest': 'document'
 };
+
+// Cache du cf_clearance obtenu par Puppeteer (partagé entre comptes, lié à l'IP)
+let CF_CLEARANCE = null;
 
 // ==========================================
 // 1. SERVEUR WEB (KEEP-ALIVE RENDER)
 // ==========================================
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('🤖 Bot BoxToPlay - Session Keeper V2'));
+app.get('/', (req, res) => res.send('🤖 Bot BoxToPlay - Session Keeper V3 (Puppeteer)'));
 app.get('/keep-alive', (req, res) => res.status(200).send('Ping reçu !'));
 app.listen(PORT, () => console.log(`🌍 Serveur Web écoute sur le port ${PORT}`));
 
@@ -57,7 +61,8 @@ async function loadFromGist() {
         LOCAL_STATE = JSON.parse(files[GIST_FILENAME].content);
         console.log("✅ État chargé.");
 
-        // On lance immédiatement la boucle de maintien
+        // Résoudre le challenge Cloudflare AVANT de lancer le cycle
+        await solveCloudflareChallenge();
         runKeepAliveCycle();
     } catch (error) {
         console.error("❌ Erreur Load Gist:", error.message);
@@ -70,32 +75,122 @@ async function saveToGist() {
         await axios.patch(`https://api.github.com/gists/${GIST_ID}`, {
             files: { [GIST_FILENAME]: { content: JSON.stringify(LOCAL_STATE, null, 4) } }
         }, { headers: { 'Authorization': `token ${GH_TOKEN}` } });
-        console.log("💾 Gist mis à jour avec les nouveaux cookies.");
+        console.log("💾 Gist mis à jour.");
     } catch (error) {
         console.error("❌ Erreur Save Gist:", error.message);
     }
 }
 
 // ==========================================
-// 3. LOGIQUE CURL (Contourne le TLS fingerprint de Node.js)
+// 3. PUPPETEER-STEALTH (Résoudre le challenge Cloudflare)
 // ==========================================
 
-// Helper pour formater le cookie correctement
+/**
+ * Lance un vrai Chrome headless stealth qui résout le challenge Cloudflare.
+ * Récupère le cookie cf_clearance depuis l'IP du serveur.
+ */
+async function solveCloudflareChallenge() {
+    console.log("🌐 Lancement Puppeteer-stealth pour résoudre Cloudflare...");
+
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process',
+                '--disable-extensions',
+            ],
+        });
+
+        const page = await browser.newPage();
+        await page.setUserAgent(USER_AGENT);
+        await page.setViewport({ width: 1920, height: 1080 });
+
+        console.log("   ⏳ Navigation vers boxtoplay.com...");
+        await page.goto('https://www.boxtoplay.com/fr/login', {
+            waitUntil: 'networkidle2',
+            timeout: 60000,
+        });
+
+        // Attendre que le challenge soit résolu (titre change de "Just a moment...")
+        console.log("   ⏳ Attente résolution du challenge (max 30s)...");
+        try {
+            await page.waitForFunction(
+                () => !document.title.includes('Just a moment'),
+                { timeout: 30000 }
+            );
+        } catch (e) {
+            console.log("   ⚠️ Timeout — le challenge n'a peut-être pas été présenté");
+        }
+
+        // Pause supplémentaire
+        await new Promise(r => setTimeout(r, 3000));
+
+        const title = await page.title();
+        console.log(`   📄 Titre final: "${title}"`);
+
+        // Récupérer les cookies
+        const cookies = await page.cookies('https://www.boxtoplay.com');
+        const cfCookie = cookies.find(c => c.name === 'cf_clearance');
+
+        if (cfCookie) {
+            CF_CLEARANCE = cfCookie.value;
+            console.log(`   ✅ cf_clearance obtenu ! (expire dans ~30min)`);
+        } else {
+            console.log("   ⚠️ Pas de cf_clearance. Cookies:", cookies.map(c => c.name).join(', '));
+            // Peut-être que Cloudflare n'a pas mis de challenge (IP locale par ex.)
+        }
+
+        await browser.close();
+        browser = null;
+        console.log("🌐 Puppeteer fermé.\n");
+
+    } catch (error) {
+        console.error("❌ Erreur Puppeteer:", error.message);
+        if (browser) {
+            try { await browser.close(); } catch (e) { /* ignore */ }
+        }
+    }
+}
+
+// ==========================================
+// 4. LOGIQUE CURL (avec cf_clearance injecté)
+// ==========================================
+
 function formatCookie(cookieValue) {
     if (!cookieValue) return "";
-    if (cookieValue.includes("=")) {
-        return cookieValue;
-    }
+    if (cookieValue.includes("=")) return cookieValue;
     return `BOXTOPLAY_SESSION=${cookieValue}`;
 }
 
 /**
- * Fait une requête GET via curl (contourne le blocage Cloudflare TLS)
- * Retourne { status, headers, body, cookies, finalUrl }
+ * Construit la chaîne cookie complète : session du compte + cf_clearance de Puppeteer
+ */
+function buildFullCookie(accountCookie) {
+    let parts = formatCookie(accountCookie);
+
+    if (CF_CLEARANCE) {
+        if (parts.includes('cf_clearance=')) {
+            parts = parts.replace(/cf_clearance=[^;]+/, `cf_clearance=${CF_CLEARANCE}`);
+        } else {
+            parts += `; cf_clearance=${CF_CLEARANCE}`;
+        }
+    }
+
+    return parts;
+}
+
+/**
+ * GET via curl
  */
 function curlGet(url, cookieString, extraHeaders = {}) {
     const allHeaders = { ...BROWSER_HEADERS, ...extraHeaders };
-    // On retire les headers qui gêneraient curl
     delete allHeaders['Accept-Encoding'];
 
     const headerArgs = Object.entries(allHeaders)
@@ -104,10 +199,7 @@ function curlGet(url, cookieString, extraHeaders = {}) {
 
     const cookieArg = cookieString ? `-b '${cookieString}'` : '';
 
-    const cmd = `curl -sS -L -D /dev/stderr -o /dev/stdout --max-time 15 ${cookieArg} ${headerArgs} '${url}' 2>&1`;
-
     try {
-        // On utilise une approche avec fichiers temp pour séparer headers et body
         const tmpHeaders = `/tmp/btp_h_${Date.now()}`;
         const fullCmd = `curl -sS -L -D '${tmpHeaders}' --max-time 15 ${cookieArg} ${headerArgs} '${url}'`;
 
@@ -121,50 +213,37 @@ function curlGet(url, cookieString, extraHeaders = {}) {
         try { headersRaw = execSync(`cat '${tmpHeaders}' 2>/dev/null && rm -f '${tmpHeaders}'`, { encoding: 'utf-8' }); }
         catch (e) { /* ignore */ }
 
-        // Extraire le dernier status (après redirections)
         const statusMatches = headersRaw.match(/HTTP\/[\d.]+ (\d+)/g) || [];
         const lastStatus = statusMatches.length > 0
             ? parseInt(statusMatches[statusMatches.length - 1].match(/(\d+)$/)[1])
             : 0;
 
-        // Extraire les Set-Cookie
         const setCookies = [];
         for (const line of headersRaw.split('\n')) {
             const m = line.match(/^set-cookie:\s*(.+)/i);
             if (m) setCookies.push(m[1].trim());
         }
 
-        // Détecter l'URL finale (dernière Location ou l'URL d'origine)
-        const locationMatches = headersRaw.match(/^location:\s*(.+)/gim) || [];
-        const finalUrl = locationMatches.length > 0
-            ? locationMatches[locationMatches.length - 1].replace(/^location:\s*/i, '').trim()
-            : url;
-
-        return { status: lastStatus, headers: headersRaw, body, setCookies, finalUrl };
+        return { status: lastStatus, headers: headersRaw, body, setCookies };
     } catch (error) {
         console.error(`❌ Curl error: ${error.message}`);
-        return { status: 0, headers: '', body: '', setCookies: [], finalUrl: url };
+        return { status: 0, headers: '', body: '', setCookies: [] };
     }
 }
 
-/**
- * Traite les Set-Cookie pour mettre à jour l'état local
- */
 function processSetCookies(setCookies, accountIndex) {
     if (!setCookies || setCookies.length === 0) return;
 
     const account = LOCAL_STATE.accounts[accountIndex];
     for (const cookieStr of setCookies) {
         if (cookieStr.startsWith('BOXTOPLAY_SESSION')) {
-            const cleanValue = cookieStr.split(';')[0]; // "BOXTOPLAY_SESSION=xxx"
+            const cleanValue = cookieStr.split(';')[0];
             const oldVal = formatCookie(account.cookies['BOXTOPLAY_SESSION']);
 
             if (cleanValue !== oldVal) {
-                console.log(`🔄 COOKIE REFRESH pour ${account.email} !`);
-                // Reconstruire le cookie complet avec le nouveau BOXTOPLAY_SESSION
+                console.log(`🔄 COOKIE REFRESH pour ${account.email}`);
                 let fullCookie = account.cookies['BOXTOPLAY_SESSION'];
                 if (fullCookie && fullCookie.includes('BOXTOPLAY_SESSION=')) {
-                    // Remplacer la partie BOXTOPLAY_SESSION dans la chaîne complète
                     fullCookie = fullCookie.replace(/BOXTOPLAY_SESSION=[^;]+/, cleanValue);
                 } else {
                     fullCookie = cleanValue;
@@ -177,7 +256,7 @@ function processSetCookies(setCookies, accountIndex) {
 }
 
 // ==========================================
-// 4. BOUCLE DE MAINTIEN (KeepAlive)
+// 5. BOUCLE DE MAINTIEN (KeepAlive)
 // ==========================================
 
 async function checkAccount(account, index) {
@@ -186,7 +265,7 @@ async function checkAccount(account, index) {
         return;
     }
 
-    const cookieString = formatCookie(account.cookies['BOXTOPLAY_SESSION']);
+    const cookieString = buildFullCookie(account.cookies['BOXTOPLAY_SESSION']);
 
     try {
         let url = 'https://www.boxtoplay.com/panel';
@@ -218,35 +297,36 @@ async function checkAccount(account, index) {
 
         const result = curlGet(url, cookieString, extraHeaders);
 
-        // Traiter les cookies rafraîchis
         processSetCookies(result.setCookies, index);
 
-        // Détecter session expirée (redirection vers la page login dans les headers)
+        // Détecter session expirée
         const redirectedToLogin = result.headers.toLowerCase().includes('location: /fr/login')
             || result.headers.toLowerCase().includes('location: /login');
 
         if (redirectedToLogin) {
-            console.error(`💀 SESSION EXPIRÉE pour ${account.email} → Mets à jour les cookies dans le Gist !`);
+            console.error(`💀 SESSION EXPIRÉE pour ${account.email}`);
             return;
         }
 
         if (result.status === 403) {
-            // Extraire le titre de la page pour identifier qui bloque (Cloudflare? BoxToPlay?)
-            const titleMatch = result.body.match(/<title>([^<]*)<\/title>/i);
-            const title = titleMatch ? titleMatch[1].trim() : '(pas de titre)';
-            // Chercher des indices Cloudflare
-            const isCF = result.body.includes('cf-') || result.body.includes('cloudflare') || result.body.includes('challenge-platform');
-            const serverHeader = (result.headers.match(/^server:\s*(.+)/im) || [])[1] || '?';
-            console.error(`❌ 403 pour ${account.email}`);
-            console.error(`   ├─ Titre page: "${title}"`);
-            console.error(`   ├─ Serveur: ${serverHeader.trim()}`);
-            console.error(`   ├─ Cloudflare challenge: ${isCF ? 'OUI' : 'NON'}`);
-            console.error(`   ├─ Body (500 premiers chars):`);
-            console.error(`   │  ${result.body.substring(0, 500).replace(/\n/g, '\n   │  ')}`);
-            console.error(`   └─ Headers pertinents:`);
-            result.headers.split('\n').forEach(l => {
-                if (l.match(/^(cf-|server:|set-cookie:|HTTP\/)/i)) console.error(`      ${l.trim()}`);
-            });
+            const isCF = result.body.includes('challenge-platform') || result.headers.includes('cf-mitigated');
+
+            if (isCF) {
+                console.error(`❌ 403 Cloudflare pour ${account.email} — relance Puppeteer...`);
+                await solveCloudflareChallenge();
+                // Retenter
+                const retryCookie = buildFullCookie(account.cookies['BOXTOPLAY_SESSION']);
+                const retry = curlGet(url, retryCookie, extraHeaders);
+                if (retry.status === 200) {
+                    console.log(`💓 Ping OK (retry) pour ${account.email}`);
+                    processSetCookies(retry.setCookies, index);
+                } else {
+                    console.error(`❌ Toujours ${retry.status} après retry pour ${account.email}`);
+                }
+            } else {
+                const titleMatch = result.body.match(/<title>([^<]*)<\/title>/i);
+                console.error(`❌ 403 pour ${account.email}: "${titleMatch ? titleMatch[1] : '?'}"`);
+            }
         } else if (result.status === 200) {
             console.log(`💓 Ping OK pour ${account.email} (${url.split('/').pop()})`);
         } else {
@@ -261,16 +341,14 @@ async function checkAccount(account, index) {
 async function runKeepAliveCycle() {
     if (!LOCAL_STATE) return;
     console.log("--- 🔄 Cycle KeepAlive ---");
-    // On vérifie tous les comptes
     for (let i = 0; i < LOCAL_STATE.accounts.length; i++) {
         await checkAccount(LOCAL_STATE.accounts[i], i);
-        // Petite pause pour ne pas spammer
         await new Promise(r => setTimeout(r, 2000));
     }
 }
 
 // ==========================================
-// 5. DISCORD
+// 6. DISCORD
 // ==========================================
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -286,7 +364,6 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
     catch (e) { console.error(e); }
 })();
 
-// Mise à jour présence Discord (Via API externe pour ne pas user les cookies)
 async function updatePresence() {
     try {
         const stats = await axios.get(`https://api.mcsrvstat.us/3/${IP_DNS}.boxtoplay.com`);
@@ -303,9 +380,11 @@ client.once('clientReady', () => {
     console.log(`🤖 Connecté: ${client.user.tag}`);
     loadFromGist();
 
-    // Tâches
-    setInterval(updatePresence, 60 * 1000); // Discord (1 min)
-    setInterval(runKeepAliveCycle, 5 * 60 * 1000); // KeepAlive (5 min)
+    setInterval(updatePresence, 60 * 1000);
+    setInterval(runKeepAliveCycle, 5 * 60 * 1000);
+
+    // Renouveler le cf_clearance toutes les 25 min (expire après ~30 min)
+    setInterval(solveCloudflareChallenge, 25 * 60 * 1000);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -313,7 +392,8 @@ client.on('interactionCreate', async interaction => {
     if (interaction.commandName === 'info') {
         if (!LOCAL_STATE) return interaction.reply("Chargement...");
         const active = LOCAL_STATE.accounts[LOCAL_STATE.active_account_index];
-        interaction.reply(`Compte actif: ${active.email}\nServeur: ${LOCAL_STATE.current_server_id}`);
+        const cfStatus = CF_CLEARANCE ? '✅ Actif' : '❌ Absent';
+        interaction.reply(`Compte actif: ${active.email}\nServeur: ${LOCAL_STATE.current_server_id}\nCloudflare: ${cfStatus}`);
     }
 });
 
