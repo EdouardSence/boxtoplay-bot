@@ -86,10 +86,36 @@ async function saveToGist() {
 // ==========================================
 
 /**
+ * S'assure que Chrome est installé pour Puppeteer (nécessaire sur Render)
+ */
+function ensureChromeInstalled() {
+    try {
+        const browserPath = require('puppeteer').executablePath();
+        const fs = require('fs');
+        if (fs.existsSync(browserPath)) {
+            console.log("🌐 Chrome trouvé:", browserPath);
+            return;
+        }
+    } catch (e) { /* pas trouvé */ }
+
+    console.log("🌐 Chrome non trouvé, installation en cours...");
+    try {
+        execSync('npx puppeteer browsers install chrome', {
+            stdio: 'inherit',
+            timeout: 120000
+        });
+        console.log("🌐 Chrome installé avec succès !");
+    } catch (e) {
+        console.error("❌ Impossible d'installer Chrome:", e.message);
+    }
+}
+
+/**
  * Lance un vrai Chrome headless stealth qui résout le challenge Cloudflare.
  * Récupère le cookie cf_clearance depuis l'IP du serveur.
  */
 async function solveCloudflareChallenge() {
+    ensureChromeInstalled();
     console.log("🌐 Lancement Puppeteer-stealth pour résoudre Cloudflare...");
 
     let browser = null;
