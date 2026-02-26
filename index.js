@@ -1,9 +1,10 @@
 // ==========================================
 // CONFIGURATION & DEPENDANCES
 // ==========================================
+require('dotenv').config();
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
-const https = require('https');
+const { execSync } = require('child_process');
 const express = require('express');
 
 // Secrets
@@ -76,84 +77,103 @@ async function saveToGist() {
 }
 
 // ==========================================
-// 3. LOGIQUE AXIOS & INTERCEPTEURS
+// 3. LOGIQUE CURL (Contourne le TLS fingerprint de Node.js)
 // ==========================================
 
 // Helper pour formater le cookie correctement
 function formatCookie(cookieValue) {
     if (!cookieValue) return "";
-    // S'il y a déjà un '=', on suppose que c'est une chaîne de cookies formatée
-    // (ex: cf_clearance=...; BOXTOPLAY_SESSION=...)
     if (cookieValue.includes("=")) {
         return cookieValue;
     }
-    // Pour la rétrocompatibilité si la valeur est juste le token brut
     return `BOXTOPLAY_SESSION=${cookieValue}`;
 }
 
-// Fonction qui crée une instance Axios pour un compte donné
-function createAxiosInstance(accountIndex) {
+/**
+ * Fait une requête GET via curl (contourne le blocage Cloudflare TLS)
+ * Retourne { status, headers, body, cookies, finalUrl }
+ */
+function curlGet(url, cookieString, extraHeaders = {}) {
+    const allHeaders = { ...BROWSER_HEADERS, ...extraHeaders };
+    // On retire les headers qui gêneraient curl
+    delete allHeaders['Accept-Encoding'];
+
+    const headerArgs = Object.entries(allHeaders)
+        .map(([k, v]) => `-H '${k}: ${v}'`)
+        .join(' ');
+
+    const cookieArg = cookieString ? `-b '${cookieString}'` : '';
+
+    const cmd = `curl -sS -L -D /dev/stderr -o /dev/stdout --max-time 15 ${cookieArg} ${headerArgs} '${url}' 2>&1`;
+
+    try {
+        // On utilise une approche avec fichiers temp pour séparer headers et body
+        const tmpHeaders = `/tmp/btp_h_${Date.now()}`;
+        const fullCmd = `curl -sS -L -D '${tmpHeaders}' --max-time 15 ${cookieArg} ${headerArgs} '${url}'`;
+
+        const body = execSync(fullCmd, {
+            encoding: 'utf-8',
+            maxBuffer: 5 * 1024 * 1024,
+            timeout: 20000
+        });
+
+        let headersRaw = '';
+        try { headersRaw = execSync(`cat '${tmpHeaders}' 2>/dev/null && rm -f '${tmpHeaders}'`, { encoding: 'utf-8' }); }
+        catch (e) { /* ignore */ }
+
+        // Extraire le dernier status (après redirections)
+        const statusMatches = headersRaw.match(/HTTP\/[\d.]+ (\d+)/g) || [];
+        const lastStatus = statusMatches.length > 0
+            ? parseInt(statusMatches[statusMatches.length - 1].match(/(\d+)$/)[1])
+            : 0;
+
+        // Extraire les Set-Cookie
+        const setCookies = [];
+        for (const line of headersRaw.split('\n')) {
+            const m = line.match(/^set-cookie:\s*(.+)/i);
+            if (m) setCookies.push(m[1].trim());
+        }
+
+        // Détecter l'URL finale (dernière Location ou l'URL d'origine)
+        const locationMatches = headersRaw.match(/^location:\s*(.+)/gim) || [];
+        const finalUrl = locationMatches.length > 0
+            ? locationMatches[locationMatches.length - 1].replace(/^location:\s*/i, '').trim()
+            : url;
+
+        return { status: lastStatus, headers: headersRaw, body, setCookies, finalUrl };
+    } catch (error) {
+        console.error(`❌ Curl error: ${error.message}`);
+        return { status: 0, headers: '', body: '', setCookies: [], finalUrl: url };
+    }
+}
+
+/**
+ * Traite les Set-Cookie pour mettre à jour l'état local
+ */
+function processSetCookies(setCookies, accountIndex) {
+    if (!setCookies || setCookies.length === 0) return;
+
     const account = LOCAL_STATE.accounts[accountIndex];
-    // On récupère le cookie brut stocké
-    let rawCookie = account.cookies['BOXTOPLAY_SESSION'];
+    for (const cookieStr of setCookies) {
+        if (cookieStr.startsWith('BOXTOPLAY_SESSION')) {
+            const cleanValue = cookieStr.split(';')[0]; // "BOXTOPLAY_SESSION=xxx"
+            const oldVal = formatCookie(account.cookies['BOXTOPLAY_SESSION']);
 
-    // On crée un faux Agent HTTPS pour imiter la signature TLS de Chrome
-    const customHttpsAgent = new https.Agent({
-        ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384',
-        honorCipherOrder: true,
-        rejectUnauthorized: false
-    });
-
-    const instance = axios.create({
-        timeout: 10000,
-        httpsAgent: customHttpsAgent,
-        headers: {
-            ...BROWSER_HEADERS,
-            'Cookie': formatCookie(rawCookie)
-        },
-        maxRedirects: 5,
-        validateStatus: status => status < 500 // On gère les erreurs nous-mêmes
-    });
-
-    // L'intercepteur magique de ton ancien code !
-    instance.interceptors.response.use(response => {
-        // Détection session expirée (Redirection Login)
-        if (response.request && response.request.res && response.request.res.responseUrl) {
-            if (response.request.res.responseUrl.includes("login")) {
-                console.error(`💀 SESSION MORTE pour ${account.email} (Redirection Login)`);
-            }
-        }
-
-        // Capture du Set-Cookie
-        const setCookie = response.headers['set-cookie'];
-        if (setCookie) {
-            // On cherche le bon cookie
-            const newSessionPart = setCookie.find(c => c.startsWith('BOXTOPLAY_SESSION'));
-            if (newSessionPart) {
-                // On extrait juste la valeur propre ou on garde tout le string selon ton format préféré
-                // Ton ancien code gardait tout le string brut du header parfois
-                // Ici on va extraire la valeur pour être propre : "BOXTOPLAY_SESSION=xyz; path=..."
-
-                // Pour être compatible avec ton ancien format : on garde "BOXTOPLAY_SESSION=valeur"
-                let cleanValue = newSessionPart.split(';')[0];
-
-                const oldVal = formatCookie(LOCAL_STATE.accounts[accountIndex].cookies['BOXTOPLAY_SESSION']);
-
-                if (cleanValue !== oldVal) {
-                    console.log(`🔄 COOKIE REFRESH pour ${account.email} !`);
-                    // On met à jour l'état local
-                    LOCAL_STATE.accounts[accountIndex].cookies['BOXTOPLAY_SESSION'] = cleanValue;
-                    // On déclenche une sauvegarde Gist
-                    saveToGist();
+            if (cleanValue !== oldVal) {
+                console.log(`🔄 COOKIE REFRESH pour ${account.email} !`);
+                // Reconstruire le cookie complet avec le nouveau BOXTOPLAY_SESSION
+                let fullCookie = account.cookies['BOXTOPLAY_SESSION'];
+                if (fullCookie && fullCookie.includes('BOXTOPLAY_SESSION=')) {
+                    // Remplacer la partie BOXTOPLAY_SESSION dans la chaîne complète
+                    fullCookie = fullCookie.replace(/BOXTOPLAY_SESSION=[^;]+/, cleanValue);
+                } else {
+                    fullCookie = cleanValue;
                 }
+                LOCAL_STATE.accounts[accountIndex].cookies['BOXTOPLAY_SESSION'] = fullCookie;
+                saveToGist();
             }
         }
-        return response;
-    }, error => {
-        return Promise.reject(error);
-    });
-
-    return instance;
+    }
 }
 
 // ==========================================
@@ -166,42 +186,56 @@ async function checkAccount(account, index) {
         return;
     }
 
-    const clientAxios = createAxiosInstance(index);
+    const cookieString = formatCookie(account.cookies['BOXTOPLAY_SESSION']);
 
     try {
-        // On utilise ta stratégie : taper sur getStatus du serveur
-        // Si server_id est vide (compte inactif), on tape sur /panel pour maintenir la session quand même
         let url = 'https://www.boxtoplay.com/panel';
+        let extraHeaders = {};
 
-        // Si on a un ID de serveur, on tape dessus (c'est plus discret)
         if (account.server_id) {
             url = `https://www.boxtoplay.com/minecraft/getStatus/${account.server_id}`;
         } else if (LOCAL_STATE.current_server_id && index === LOCAL_STATE.active_account_index) {
             url = `https://www.boxtoplay.com/minecraft/getStatus/${LOCAL_STATE.current_server_id}`;
         }
 
-        const res = await clientAxios.get(url, {
-            headers: url.includes('getStatus') ? {
+        if (url.includes('getStatus')) {
+            extraHeaders = {
                 'Accept': 'application/json, text/javascript, */*; q=0.01',
                 'Sec-Fetch-Dest': 'empty',
                 'Sec-Fetch-Mode': 'cors',
                 'Sec-Fetch-Site': 'same-origin',
                 'X-Requested-With': 'XMLHttpRequest'
-            } : {
+            };
+        } else {
+            extraHeaders = {
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'same-origin',
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1'
-            }
-        });
+            };
+        }
 
-        if (res.status === 403) {
-            console.error(`❌ 403 Forbidden pour ${account.email} (Problème Headers/IP)`);
-        } else if (res.status === 200) {
+        const result = curlGet(url, cookieString, extraHeaders);
+
+        // Traiter les cookies rafraîchis
+        processSetCookies(result.setCookies, index);
+
+        // Détecter session expirée (redirection vers la page login dans les headers)
+        const redirectedToLogin = result.headers.toLowerCase().includes('location: /fr/login')
+            || result.headers.toLowerCase().includes('location: /login');
+
+        if (redirectedToLogin) {
+            console.error(`💀 SESSION EXPIRÉE pour ${account.email} → Mets à jour les cookies dans le Gist !`);
+            return;
+        }
+
+        if (result.status === 403) {
+            console.error(`❌ 403 Forbidden pour ${account.email}`);
+        } else if (result.status === 200) {
             console.log(`💓 Ping OK pour ${account.email} (${url.split('/').pop()})`);
         } else {
-            console.log(`⚠️ Status ${res.status} pour ${account.email}`);
+            console.log(`⚠️ Status ${result.status} pour ${account.email}`);
         }
 
     } catch (error) {
