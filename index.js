@@ -3,6 +3,7 @@
 // ==========================================
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
+const https = require('https');
 const express = require('express');
 
 // Secrets
@@ -96,8 +97,16 @@ function createAxiosInstance(accountIndex) {
     // On récupère le cookie brut stocké
     let rawCookie = account.cookies['BOXTOPLAY_SESSION'];
 
+    // On crée un faux Agent HTTPS pour imiter la signature TLS de Chrome
+    const customHttpsAgent = new https.Agent({
+        ciphers: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384',
+        honorCipherOrder: true,
+        rejectUnauthorized: false
+    });
+
     const instance = axios.create({
         timeout: 10000,
+        httpsAgent: customHttpsAgent,
         headers: {
             ...BROWSER_HEADERS,
             'Cookie': formatCookie(rawCookie)
@@ -241,7 +250,7 @@ async function updatePresence() {
     } catch (e) { console.error("Presence Error:", e.message); }
 }
 
-client.once('ready', () => {
+client.once('clientReady', () => {
     console.log(`🤖 Connecté: ${client.user.tag}`);
     loadFromGist();
 
