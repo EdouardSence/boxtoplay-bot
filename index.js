@@ -2,9 +2,46 @@
 // CONFIGURATION & DEPENDANCES
 // ==========================================
 require('dotenv').config();
+const { execSync } = require('child_process');
+const fs = require('fs');
+
+// --- INSTALLER CHROME AU DÉMARRAGE (avant tout import Puppeteer) ---
+(function installChrome() {
+    try {
+        // Vérifier si Chrome est déjà là
+        const cacheDirs = [
+            process.env.PUPPETEER_CACHE_DIR,
+            '/opt/render/.cache/puppeteer',
+            require('os').homedir() + '/.cache/puppeteer'
+        ].filter(Boolean);
+
+        let found = false;
+        for (const dir of cacheDirs) {
+            if (fs.existsSync(dir)) {
+                const chromeFiles = execSync(`find ${dir} -name 'chrome' -type f 2>/dev/null || true`, { encoding: 'utf-8' }).trim();
+                if (chromeFiles) {
+                    console.log('🌐 Chrome déjà installé:', chromeFiles.split('\n')[0]);
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            console.log('🌐 Chrome non trouvé, téléchargement en cours (peut prendre 1-2 min)...');
+            execSync('npx puppeteer browsers install chrome', {
+                stdio: 'inherit',
+                timeout: 180000
+            });
+            console.log('🌐 Chrome installé avec succès !');
+        }
+    } catch (e) {
+        console.error('⚠️ Erreur install Chrome:', e.message);
+    }
+})();
+
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
-const { execSync } = require('child_process');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const express = require('express');
@@ -86,36 +123,10 @@ async function saveToGist() {
 // ==========================================
 
 /**
- * S'assure que Chrome est installé pour Puppeteer (nécessaire sur Render)
- */
-function ensureChromeInstalled() {
-    try {
-        const browserPath = require('puppeteer').executablePath();
-        const fs = require('fs');
-        if (fs.existsSync(browserPath)) {
-            console.log("🌐 Chrome trouvé:", browserPath);
-            return;
-        }
-    } catch (e) { /* pas trouvé */ }
-
-    console.log("🌐 Chrome non trouvé, installation en cours...");
-    try {
-        execSync('npx puppeteer browsers install chrome', {
-            stdio: 'inherit',
-            timeout: 120000
-        });
-        console.log("🌐 Chrome installé avec succès !");
-    } catch (e) {
-        console.error("❌ Impossible d'installer Chrome:", e.message);
-    }
-}
-
-/**
  * Lance un vrai Chrome headless stealth qui résout le challenge Cloudflare.
  * Récupère le cookie cf_clearance depuis l'IP du serveur.
  */
 async function solveCloudflareChallenge() {
-    ensureChromeInstalled();
     console.log("🌐 Lancement Puppeteer-stealth pour résoudre Cloudflare...");
 
     let browser = null;
