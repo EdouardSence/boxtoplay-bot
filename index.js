@@ -231,7 +231,22 @@ async function checkAccount(account, index) {
         }
 
         if (result.status === 403) {
-            console.error(`❌ 403 Forbidden pour ${account.email}`);
+            // Extraire le titre de la page pour identifier qui bloque (Cloudflare? BoxToPlay?)
+            const titleMatch = result.body.match(/<title>([^<]*)<\/title>/i);
+            const title = titleMatch ? titleMatch[1].trim() : '(pas de titre)';
+            // Chercher des indices Cloudflare
+            const isCF = result.body.includes('cf-') || result.body.includes('cloudflare') || result.body.includes('challenge-platform');
+            const serverHeader = (result.headers.match(/^server:\s*(.+)/im) || [])[1] || '?';
+            console.error(`❌ 403 pour ${account.email}`);
+            console.error(`   ├─ Titre page: "${title}"`);
+            console.error(`   ├─ Serveur: ${serverHeader.trim()}`);
+            console.error(`   ├─ Cloudflare challenge: ${isCF ? 'OUI' : 'NON'}`);
+            console.error(`   ├─ Body (500 premiers chars):`);
+            console.error(`   │  ${result.body.substring(0, 500).replace(/\n/g, '\n   │  ')}`);
+            console.error(`   └─ Headers pertinents:`);
+            result.headers.split('\n').forEach(l => {
+                if (l.match(/^(cf-|server:|set-cookie:|HTTP\/)/i)) console.error(`      ${l.trim()}`);
+            });
         } else if (result.status === 200) {
             console.log(`💓 Ping OK pour ${account.email} (${url.split('/').pop()})`);
         } else {
