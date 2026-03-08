@@ -392,75 +392,74 @@ async function checkAccount(account, index) {
         return;
     }
 
-    let context = null;
+    let page = null;
     try {
         const browser = await getBrowser();
-        // Utiliser un contexte incognito pour isoler les cookies entre comptes
-        context = await browser.createBrowserContext();
-        const page = await context.newPage();
+        page = await browser.newPage();
         await page.setUserAgent(USER_AGENT);
         await page.setViewport({ width: 1366, height: 768 });
 
-        try {
-            // Injecter les cookies AVANT de naviguer (inclut cf_clearance pour bypass Cloudflare)
-            await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
+        // Nettoyer TOUS les cookies avant d'injecter ceux de ce compte
+        // (isole les comptes sans utiliser createBrowserContext qui crash sur Render)
+        const existingCookies = await page.cookies(`https://${COOKIE_DOMAIN}`);
+        if (existingCookies.length > 0) {
+            await page.deleteCookie(...existingCookies);
+        }
 
-            // Naviguer directement vers le panel ou getStatus
-            let url = URLS.BOXTOPLAY_PANEL;
-            if (account.server_id) {
-                url = URLS.BOXTOPLAY_STATUS(account.server_id);
-            } else if (LOCAL_STATE.current_server_id && index === LOCAL_STATE.active_account_index) {
-                url = URLS.BOXTOPLAY_STATUS(LOCAL_STATE.current_server_id);
+        // Injecter les cookies AVANT de naviguer (inclut cf_clearance pour bypass Cloudflare)
+        await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
+
+        // Naviguer directement vers le panel ou getStatus
+        let url = URLS.BOXTOPLAY_PANEL;
+        if (account.server_id) {
+            url = URLS.BOXTOPLAY_STATUS(account.server_id);
+        } else if (LOCAL_STATE.current_server_id && index === LOCAL_STATE.active_account_index) {
+            url = URLS.BOXTOPLAY_STATUS(LOCAL_STATE.current_server_id);
+        }
+
+        const response = await page.goto(url, {
+            waitUntil: 'networkidle2',
+            timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
+        });
+
+        // Si Cloudflare challenge apparait, attendre la resolution automatique
+        const title = await page.title();
+        if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
+            log('INFO', 'Cloudflare', `Challenge pour ${account.email}, attente resolution...`);
+            try {
+                await page.waitForFunction(
+                    (challengeTitle) => !document.title.includes(challengeTitle),
+                    { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
+                    CLOUDFLARE_CHALLENGE_TITLE
+                );
+                await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
+            } catch {
+                log('ERROR', 'Cloudflare', `Challenge non resolu pour ${account.email}`);
+                return;
             }
+        }
 
-            const response = await page.goto(url, {
-                waitUntil: 'networkidle2',
-                timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
-            });
+        const status = response ? response.status() : 0;
+        const pageUrl = page.url();
 
-            // Si Cloudflare challenge apparait, attendre la resolution automatique
-            const title = await page.title();
-            if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
-                log('INFO', 'Cloudflare', `Challenge pour ${account.email}, attente resolution...`);
-                try {
-                    await page.waitForFunction(
-                        (challengeTitle) => !document.title.includes(challengeTitle),
-                        { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
-                        CLOUDFLARE_CHALLENGE_TITLE
-                    );
-                    await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
-                } catch {
-                    log('ERROR', 'Cloudflare', `Challenge non resolu pour ${account.email}`);
-                    return;
-                }
-            }
+        // Sauvegarder les cookies mis a jour
+        await extractAndUpdateCookies(page, index);
 
-            const status = response ? response.status() : 0;
-            const pageUrl = page.url();
-
-            // Sauvegarder les cookies mis a jour
-            await extractAndUpdateCookies(page, index);
-
-            if (pageUrl.includes('login')) {
-                log('ERROR', 'KeepAlive', `SESSION EXPIREE pour ${account.email}`);
-            } else if (status === 403) {
-                log('ERROR', 'KeepAlive', `403 Forbidden pour ${account.email}`);
-            } else if (status === 200) {
-                log('INFO', 'KeepAlive', `Ping OK pour ${account.email} (${url.split('/').pop()})`);
-            } else {
-                log('WARN', 'KeepAlive', `Status ${status} pour ${account.email} (URL: ${pageUrl})`);
-            }
-
-        } finally {
-            await page.close();
+        if (pageUrl.includes('login')) {
+            log('ERROR', 'KeepAlive', `SESSION EXPIREE pour ${account.email}`);
+        } else if (status === 403) {
+            log('ERROR', 'KeepAlive', `403 Forbidden pour ${account.email}`);
+        } else if (status === 200) {
+            log('INFO', 'KeepAlive', `Ping OK pour ${account.email} (${url.split('/').pop()})`);
+        } else {
+            log('WARN', 'KeepAlive', `Status ${status} pour ${account.email} (URL: ${pageUrl})`);
         }
 
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur ${account.email}: ${error.message}`);
     } finally {
-        // Toujours fermer le contexte incognito pour liberer la memoire
-        if (context) {
-            try { await context.close(); } catch {}
+        if (page) {
+            try { await page.close(); } catch {}
         }
     }
 }
