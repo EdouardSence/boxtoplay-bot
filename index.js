@@ -392,16 +392,18 @@ async function checkAccount(account, index) {
         return;
     }
 
+    let context = null;
     try {
         const browser = await getBrowser();
-        const page = await browser.newPage();
+        // Utiliser un contexte incognito pour isoler les cookies entre comptes
+        context = await browser.createBrowserContext();
+        const page = await context.newPage();
 
         try {
             // D'abord, resoudre le challenge Cloudflare
             const cfOk = await solveCloudflareOnPage(page);
             if (!cfOk) {
                 log('ERROR', 'KeepAlive', `Challenge Cloudflare non resolu pour ${account.email}`);
-                await page.close();
                 return;
             }
 
@@ -443,15 +445,15 @@ async function checkAccount(account, index) {
 
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur ${account.email}: ${error.message}`);
+    } finally {
+        // Toujours fermer le contexte incognito pour liberer la memoire
+        if (context) {
+            try { await context.close(); } catch {}
+        }
     }
 }
 
 async function runKeepAliveCycle() {
-    if (!LOCAL_STATE) {
-        log('WARN', 'KeepAlive', 'State non charge, cycle ignore.');
-        return;
-    }
-
     // Protection contre le chevauchement des cycles
     if (keepAliveCycleRunning) {
         log('WARN', 'KeepAlive', 'Cycle precedent encore en cours, skip.');
@@ -460,6 +462,14 @@ async function runKeepAliveCycle() {
 
     keepAliveCycleRunning = true;
     try {
+        // Recharger le state depuis le Gist pour integrer les changements du worker
+        await loadFromGist();
+
+        if (!LOCAL_STATE) {
+            log('WARN', 'KeepAlive', 'State non charge, cycle ignore.');
+            return;
+        }
+
         log('INFO', 'KeepAlive', `--- Cycle KeepAlive (${LOCAL_STATE.accounts.length} comptes) ---`);
         for (let i = 0; i < LOCAL_STATE.accounts.length; i++) {
             await checkAccount(LOCAL_STATE.accounts[i], i);
