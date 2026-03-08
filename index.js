@@ -398,19 +398,14 @@ async function checkAccount(account, index) {
         // Utiliser un contexte incognito pour isoler les cookies entre comptes
         context = await browser.createBrowserContext();
         const page = await context.newPage();
+        await page.setUserAgent(USER_AGENT);
+        await page.setViewport({ width: 1366, height: 768 });
 
         try {
-            // D'abord, resoudre le challenge Cloudflare
-            const cfOk = await solveCloudflareOnPage(page);
-            if (!cfOk) {
-                log('ERROR', 'KeepAlive', `Challenge Cloudflare non resolu pour ${account.email}`);
-                return;
-            }
-
-            // Injecter les cookies de session du compte
+            // Injecter les cookies AVANT de naviguer (inclut cf_clearance pour bypass Cloudflare)
             await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
 
-            // Naviguer vers le panel ou getStatus
+            // Naviguer directement vers le panel ou getStatus
             let url = URLS.BOXTOPLAY_PANEL;
             if (account.server_id) {
                 url = URLS.BOXTOPLAY_STATUS(account.server_id);
@@ -422,6 +417,23 @@ async function checkAccount(account, index) {
                 waitUntil: 'networkidle2',
                 timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
             });
+
+            // Si Cloudflare challenge apparait, attendre la resolution automatique
+            const title = await page.title();
+            if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
+                log('INFO', 'Cloudflare', `Challenge pour ${account.email}, attente resolution...`);
+                try {
+                    await page.waitForFunction(
+                        (challengeTitle) => !document.title.includes(challengeTitle),
+                        { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
+                        CLOUDFLARE_CHALLENGE_TITLE
+                    );
+                    await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
+                } catch {
+                    log('ERROR', 'Cloudflare', `Challenge non resolu pour ${account.email}`);
+                    return;
+                }
+            }
 
             const status = response ? response.status() : 0;
             const pageUrl = page.url();
