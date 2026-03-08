@@ -366,10 +366,15 @@ async function extractAndUpdateCookies(page, accountIndex) {
     const sessionCookie = cookies.find(c => c.name === SESSION_COOKIE_KEY);
 
     if (sessionCookie) {
-        // Reconstruire la chaine de cookies complete
-        const relevantCookies = cookies
-            .filter(c => RELEVANT_COOKIE_NAMES.includes(c.name))
-            .map(c => `${c.name}=${c.value}`)
+        // Reconstruire la chaine de cookies complete (dedup par nom, derniere valeur gagne)
+        const cookieMap = new Map();
+        for (const c of cookies) {
+            if (RELEVANT_COOKIE_NAMES.includes(c.name)) {
+                cookieMap.set(c.name, c.value);
+            }
+        }
+        const relevantCookies = Array.from(cookieMap.entries())
+            .map(([name, value]) => `${name}=${value}`)
             .join('; ');
 
         const oldCookie = LOCAL_STATE.accounts[accountIndex].cookies[SESSION_COOKIE_KEY];
@@ -492,6 +497,15 @@ async function runKeepAliveCycle() {
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur cycle: ${error.message}`);
     } finally {
+        // Fermer Chrome apres chaque cycle pour liberer la memoire (Render free = 512MB)
+        // getBrowser() le relancera au prochain cycle
+        if (BROWSER) {
+            try {
+                await BROWSER.close();
+                log('INFO', 'Browser', 'Chrome ferme (fin de cycle).');
+            } catch {}
+            BROWSER = null;
+        }
         keepAliveCycleRunning = false;
     }
 }
