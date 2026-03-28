@@ -15,6 +15,7 @@ const URLS = {
     BOXTOPLAY_PANEL: 'https://www.boxtoplay.com/panel',
     BOXTOPLAY_STATUS: (serverId) => `https://www.boxtoplay.com/minecraft/getStatus/${serverId}`,
     GITHUB_GIST: (gistId) => `https://api.github.com/gists/${gistId}`,
+    GITHUB_ACTION_DISPATCH: (repo) => `https://api.github.com/repos/${repo}/actions/workflows/schedule.yml/dispatches`,
     MC_STATUS: (dns) => `https://api.mcsrvstat.us/3/${dns}.boxtoplay.com`,
 };
 
@@ -66,7 +67,7 @@ function log(level, context, message, extra) {
 // ==========================================
 // VALIDATION DES VARIABLES D'ENVIRONNEMENT
 // ==========================================
-const REQUIRED_ENV_VARS = ['DISCORD_TOKEN', 'CLIENT_ID', 'GIST_ID', 'GH_TOKEN'];
+const REQUIRED_ENV_VARS = ['DISCORD_TOKEN', 'CLIENT_ID', 'GIST_ID', 'GH_TOKEN', 'GITHUB_REPO'];
 
 function validateEnv() {
     const missing = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
@@ -83,6 +84,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GIST_ID = process.env.GIST_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO;
 const IP_DNS = process.env.IP_DNS || 'orny';
 
 // ==========================================
@@ -520,6 +522,7 @@ const commands = [
     new SlashCommandBuilder().setName('ip').setDescription('Affiche l\'adresse IP du serveur'),
     new SlashCommandBuilder().setName('status').setDescription('Statut du serveur Minecraft (online/offline)'),
     new SlashCommandBuilder().setName('players').setDescription('Liste des joueurs connectes'),
+    new SlashCommandBuilder().setName('rotate').setDescription('Declenche la rotation via GitHub Actions'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -574,6 +577,37 @@ async function fetchMcStatus() {
     } catch (error) {
         log('WARN', 'McStatus', `Erreur API: ${error.message}`);
         return null;
+    }
+}
+
+async function triggerGitHubAction() {
+    const dispatchUrl = URLS.GITHUB_ACTION_DISPATCH(GITHUB_REPO);
+
+    try {
+        const response = await axios.post(
+            dispatchUrl,
+            { ref: 'main' },
+            {
+                headers: {
+                    Authorization: `token ${GH_TOKEN}`,
+                    Accept: 'application/vnd.github.v3+json',
+                },
+                timeout: 15000,
+            }
+        );
+
+        if (response.status === 200 || response.status === 204) {
+            log('INFO', 'Rotate', `Workflow schedule.yml declenche sur ${GITHUB_REPO}.`);
+            return true;
+        }
+
+        log('WARN', 'Rotate', `Reponse inattendue GitHub Actions: HTTP ${response.status}`);
+        return false;
+    } catch (error) {
+        const status = error.response?.status;
+        const details = error.response?.data || error.message;
+        log('ERROR', 'Rotate', `Echec declenchement GitHub Actions${status ? ` (HTTP ${status})` : ''}`, details);
+        return false;
     }
 }
 
@@ -668,6 +702,18 @@ client.on('interactionCreate', async interaction => {
         ];
 
         return interaction.editReply(lines.join('\n'));
+    }
+
+    // --- /rotate ---
+    if (commandName === 'rotate') {
+        await interaction.deferReply();
+
+        const dispatched = await triggerGitHubAction();
+        if (dispatched) {
+            return interaction.editReply('✅ Rotation lancée sur GitHub Actions !');
+        }
+
+        return interaction.editReply('❌ Impossible de lancer la rotation sur GitHub Actions.');
     }
 });
 
