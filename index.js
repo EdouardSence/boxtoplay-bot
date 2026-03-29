@@ -355,6 +355,19 @@ async function injectCookies(page, cookieString) {
         }
     }
 
+    // Fallback: cookie brut sans format name=value
+    // On le traite comme valeur de BOXTOPLAY_SESSION pour préserver la compatibilité Gist.
+    if (cookieObjects.length === 0 && cookieString && !cookieString.includes('=')) {
+        cookieObjects.push({
+            name: SESSION_COOKIE_KEY,
+            value: cookieString.trim(),
+            domain: COOKIE_DOMAIN,
+            path: '/',
+            httpOnly: true,
+            secure: true,
+        });
+    }
+
     if (cookieObjects.length > 0) {
         await page.setCookie(...cookieObjects);
     }
