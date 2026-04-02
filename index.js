@@ -29,6 +29,7 @@ const RELEVANT_COOKIE_NAMES = [
     'cookie_consent_user_consent_token',
 ];
 const SESSION_COOKIE_KEY = 'BOXTOPLAY_SESSION';
+let statusMessage = '🔴 | 👥 0 | 🧠 0.00 Go | ⚙️ 0%';
 
 const TIMINGS = {
     CLOUDFLARE_TIMEOUT: 30000,
@@ -547,17 +548,51 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function updatePresence() {
     try {
-        const stats = await axios.get(URLS.MC_STATUS(IP_DNS), { timeout: 10000 });
-        const s = stats.data;
-        if (s.online) {
-            const modpack = LOCAL_STATE?.modpack || '';
-            const suffix = modpack ? ` | ${modpack}` : '';
-            client.user.setActivity(`${s.players.online}/${s.players.max} Joueurs${suffix}`);
-        } else {
-            client.user.setActivity('Serveur OFF');
+        if (!LOCAL_STATE?.accounts?.length || !LOCAL_STATE.current_server_id) {
+            client.user.setActivity(statusMessage);
+            return;
         }
+
+        const activeIndex = LOCAL_STATE.active_account_index;
+        const account = LOCAL_STATE.accounts[activeIndex];
+        const cookieHeader = account?.cookies?.[SESSION_COOKIE_KEY];
+        const serverId = LOCAL_STATE.current_server_id;
+
+        if (!cookieHeader || !serverId) {
+            client.user.setActivity(statusMessage);
+            return;
+        }
+
+        const urls = {
+            status: URLS.BOXTOPLAY_STATUS(serverId),
+            onlinePlayers: `https://www.boxtoplay.com/minecraft/getOnlinePlayers/${serverId}`,
+            memoryUsage: `https://www.boxtoplay.com/minecraft/getMcMemUsage/${serverId}`,
+            cpuUsage: `https://www.boxtoplay.com/minecraft/getMcCpuUsagePercent/${serverId}`,
+        };
+
+        const responses = await Promise.all(
+            Object.entries(urls).map(([key, url]) =>
+                axios.get(url, {
+                    headers: { Cookie: cookieHeader },
+                    timeout: 10000,
+                }).then(res => [key, res.data])
+            )
+        );
+
+        const data = Object.fromEntries(responses);
+        const memoryGo = Number(data.memoryUsage || 0) / 1000;
+
+        if (data.status === 'STARTED') data.status = '🟢';
+        else if (data.status === 'STOPPED') data.status = '🔴';
+        else if (data.status === 'STARTING') data.status = '🟡';
+        else data.status = '⚪';
+
+        statusMessage = `${data.status} | 👥 ${data.onlinePlayers ?? 0} | 🧠 ${memoryGo.toFixed(2)} Go | ⚙️ ${data.cpuUsage ?? 0}%`;
+        client.user.setActivity(statusMessage);
+        log('INFO', 'Presence', `Updated activity for ${account.email}: ${statusMessage}`);
     } catch (e) {
         log('WARN', 'Presence', `Erreur: ${e.message}`);
+        client.user.setActivity(statusMessage);
     }
 }
 
