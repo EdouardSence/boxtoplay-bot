@@ -14,6 +14,9 @@ const URLS = {
     BOXTOPLAY_LOGIN: 'https://www.boxtoplay.com/fr/login',
     BOXTOPLAY_PANEL: 'https://www.boxtoplay.com/panel',
     BOXTOPLAY_STATUS: (serverId) => `https://www.boxtoplay.com/minecraft/getStatus/${serverId}`,
+    BOXTOPLAY_ONLINE_PLAYERS: (serverId) => `https://www.boxtoplay.com/minecraft/getOnlinePlayers/${serverId}`,
+    BOXTOPLAY_MEMORY_USAGE: (serverId) => `https://www.boxtoplay.com/minecraft/getMcMemUsage/${serverId}`,
+    BOXTOPLAY_CPU_USAGE: (serverId) => `https://www.boxtoplay.com/minecraft/getMcCpuUsagePercent/${serverId}`,
     GITHUB_GIST: (gistId) => `https://api.github.com/gists/${gistId}`,
     GITHUB_ACTION_DISPATCH: (repo) => `https://api.github.com/repos/${repo}/actions/workflows/schedule.yml/dispatches`,
     MC_STATUS: (dns) => `https://api.mcsrvstat.us/3/${dns}.boxtoplay.com`,
@@ -548,6 +551,12 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function updatePresence() {
     try {
+        // Eviter la concurrence avec le cycle keepalive (qui ferme Chrome en fin de cycle)
+        if (keepAliveCycleRunning) {
+            client.user.setActivity(statusMessage);
+            return;
+        }
+
         if (!LOCAL_STATE?.accounts?.length || !LOCAL_STATE.current_server_id) {
             client.user.setActivity(statusMessage);
             return;
@@ -563,23 +572,67 @@ async function updatePresence() {
             return;
         }
 
-        const urls = {
-            status: URLS.BOXTOPLAY_STATUS(serverId),
-            onlinePlayers: `https://www.boxtoplay.com/minecraft/getOnlinePlayers/${serverId}`,
-            memoryUsage: `https://www.boxtoplay.com/minecraft/getMcMemUsage/${serverId}`,
-            cpuUsage: `https://www.boxtoplay.com/minecraft/getMcCpuUsagePercent/${serverId}`,
-        };
+        // IMPORTANT: passer par Chromium/Puppeteer (Cloudflare), pas axios direct
+        const browser = await getBrowser();
+        const page = await browser.newPage();
+        let data;
+        try {
+            await page.setUserAgent(USER_AGENT);
+            await page.setViewport({ width: 1366, height: 768 });
 
-        const responses = await Promise.all(
-            Object.entries(urls).map(([key, url]) =>
-                axios.get(url, {
-                    headers: { Cookie: cookieHeader },
-                    timeout: 10000,
-                }).then(res => [key, res.data])
-            )
-        );
+            const existingCookies = await page.cookies(`https://${COOKIE_DOMAIN}`);
+            if (existingCookies.length > 0) {
+                await page.deleteCookie(...existingCookies);
+            }
 
-        const data = Object.fromEntries(responses);
+            await injectCookies(page, cookieHeader);
+
+            await page.goto(URLS.BOXTOPLAY_PANEL, {
+                waitUntil: 'networkidle2',
+                timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
+            });
+
+            const title = await page.title();
+            if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
+                await page.waitForFunction(
+                    (challengeTitle) => !document.title.includes(challengeTitle),
+                    { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
+                    CLOUDFLARE_CHALLENGE_TITLE
+                );
+                await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
+            }
+
+            if (page.url().includes('login')) {
+                throw new Error(`Session expiree pour ${account.email}`);
+            }
+
+            data = await page.evaluate(async (urls) => {
+                async function fetchText(url) {
+                    const response = await fetch(url, { credentials: 'include' });
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status} sur ${url}`);
+                    }
+                    return (await response.text()).trim();
+                }
+
+                const [status, onlinePlayers, memoryUsage, cpuUsage] = await Promise.all([
+                    fetchText(urls.status),
+                    fetchText(urls.onlinePlayers),
+                    fetchText(urls.memoryUsage),
+                    fetchText(urls.cpuUsage),
+                ]);
+
+                return { status, onlinePlayers, memoryUsage, cpuUsage };
+            }, {
+                status: URLS.BOXTOPLAY_STATUS(serverId),
+                onlinePlayers: URLS.BOXTOPLAY_ONLINE_PLAYERS(serverId),
+                memoryUsage: URLS.BOXTOPLAY_MEMORY_USAGE(serverId),
+                cpuUsage: URLS.BOXTOPLAY_CPU_USAGE(serverId),
+            });
+        } finally {
+            try { await page.close(); } catch {}
+        }
+
         const memoryGo = Number(data.memoryUsage || 0) / 1000;
 
         if (data.status === 'STARTED') data.status = '🟢';
