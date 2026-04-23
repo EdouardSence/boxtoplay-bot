@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: implement-feature
+title: Implement Feature
+version: 0.1.0
+description: Feature implementation workflow
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

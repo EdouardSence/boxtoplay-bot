@@ -1,0 +1,17 @@
+schema: anvil.component/v1
+type: agent
+name: code-reviewer
+title: Code Reviewer
+version: 0.1.0
+description: Reviews completed work against plan and coding standards — categorizes issues by severity
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+    model: sonnet
+    tools: Read, Grep, Glob, Bash
+  cursor:
+    supported: true
+entry:
+  file: index.md

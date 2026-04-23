@@ -1,0 +1,231 @@
+{
+  "version": 2,
+  "agent": "copilot",
+  "preset": null,
+  "marketplaces": {
+    "official": {
+      "kind": "git",
+      "enabled": true,
+      "priority": 0,
+      "remote": "https://github.com/FR-NAN-AI/anvil-marketplace.git",
+      "ref": "main"
+    }
+  },
+  "components": {
+    "skills": {
+      "onboarding": {
+        "marketplace": "official",
+        "customized": false,
+        "catalogPath": "skills/onboarding",
+        "hash": "b405603163ac4a4f75a53c6fd2eec2945a900723822ca634aae626f1dc1af5e3"
+      },
+      "anvil-cli-reference": {
+        "marketplace": "official",
+        "customized": false,
+        "catalogPath": "skills/anvil-cli-reference",
+        "hash": "0386334da51685578984f752b250cbbb9d3ec7f01561655dddd3ae5d750c6ceb"
+      },
+      "catalog-browser": {
+        "marketplace": "official",
+        "customized": false,
+        "catalogPath": "skills/catalog-browser",
+        "hash": "ddf2bd88d3e020a9b31196d9ef4888ff194f6f64e3e491889639caf53507c977"
+      },
+      "generate-project-wiki": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.296Z",
+        "catalogPath": "skills/generate-project-wiki",
+        "hash": "6d899c9f2fc921e2ce1d5bee0b93096cb57bf1e96f7579ce0dd6977c61ac94c0",
+        "updatedAt": "2026-04-21T21:58:05.296Z"
+      },
+      "generate-runnable-readme": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.345Z",
+        "catalogPath": "skills/generate-runnable-readme",
+        "hash": "b07f8ee03d5a9e53b1d60fd9903f36ff01d99120bb6554d5c43115e280ef1e7c",
+        "updatedAt": "2026-04-21T21:58:05.345Z"
+      },
+      "analyze-codebase-deep": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.398Z",
+        "catalogPath": "skills/analyze-codebase-deep",
+        "hash": "7a3908c4d72a711bd6e7ec8bab7d4d1b3a50634c7512e39d35279d9d0f129dbd",
+        "updatedAt": "2026-04-21T21:58:05.398Z"
+      },
+      "coding-principles": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.447Z",
+        "catalogPath": "skills/coding-principles",
+        "hash": "980c8a7f426e7a57e95680e948487565c6d9d5194a87565012003bd36ff4484e",
+        "updatedAt": "2026-04-21T21:58:05.447Z"
+      },
+      "verification-before-completion": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.495Z",
+        "catalogPath": "skills/verification-before-completion",
+        "hash": "d707a7503b0bb0ba239a03893f9a959a7587e2a885b88874f58f89adc6a6b61c",
+        "updatedAt": "2026-04-21T21:58:05.495Z"
+      },
+      "security-review": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.543Z",
+        "catalogPath": "skills/security-review",
+        "hash": "ca87a55d70208176fc92d472a6aef1b33a4c5ca5fbdba13661e1192921094fa0",
+        "updatedAt": "2026-04-21T21:58:05.543Z"
+      },
+      "systematic-debugging": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.594Z",
+        "catalogPath": "skills/systematic-debugging",
+        "hash": "1cd04055a2f2ed6c722143743c560f9f6e8cb29f25fe135bc352e3ec5d3bdb8e",
+        "updatedAt": "2026-04-21T21:58:05.594Z"
+      },
+      "test-driven-development": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.641Z",
+        "catalogPath": "skills/test-driven-development",
+        "hash": "848851744a7eef1728eb336ff2a48312201366a843422894b2a2305a79d81564",
+        "updatedAt": "2026-04-21T21:58:05.641Z"
+      },
+      "implement-feature": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.688Z",
+        "catalogPath": "skills/implement-feature",
+        "hash": "36a30feaba1e4dbb086e5175f984033f9c2c9c4a3824a1f519ba6e067322e16e",
+        "updatedAt": "2026-04-21T21:58:05.688Z"
+      },
+      "create-pr": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:58:05.737Z",
+        "catalogPath": "skills/create-pr",
+        "hash": "7312ab7baf0e277d9beb476727cce7b463825b203b7abde9048240a848c382bc",
+        "updatedAt": "2026-04-21T21:58:05.737Z"
+      }
+    },
+    "recipes": {
+      "development/us-to-pr": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.549Z",
+        "catalogPath": "recipes/development/us-to-pr",
+        "hash": "2ecdf641a7e7f5082be2ae94caf1bcc49a00dd8eacbb7925538732e91210d055",
+        "updatedAt": "2026-04-21T21:59:56.549Z"
+      },
+      "development/bugfix": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.598Z",
+        "catalogPath": "recipes/development/bugfix",
+        "hash": "fb4e19bf0bd26b8835f5997cea1dccd6b5958d825ac72a81ce14a2bc456dcd6c",
+        "updatedAt": "2026-04-21T21:59:56.598Z"
+      },
+      "review/pr-review": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.649Z",
+        "catalogPath": "recipes/review/pr-review",
+        "hash": "11a88055929414e5d73a30a281a2de8dabe41d84381169822b79e41d8def7fea",
+        "updatedAt": "2026-04-21T21:59:56.649Z"
+      },
+      "review/post-merge-check": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.696Z",
+        "catalogPath": "recipes/review/post-merge-check",
+        "hash": "4936731c89b834cdd7533fd75b544420336840475722e2b9b4808fd0b199ab07",
+        "updatedAt": "2026-04-21T21:59:56.696Z"
+      }
+    },
+    "hooks": {
+      "pre-commit-check": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.444Z",
+        "catalogPath": "hooks/pre-commit-check",
+        "hash": "ef94ac5b8249c8df38d50fae4b2307b8464d65b89d344cf8c72772d5f904fa57",
+        "updatedAt": "2026-04-21T21:59:56.444Z"
+      },
+      "dependency-check": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.500Z",
+        "catalogPath": "hooks/dependency-check",
+        "hash": "3c5342e5597000a205a44fd7de0d437d8648ae0691c47ba7b4181fa21824fbaa",
+        "updatedAt": "2026-04-21T21:59:56.500Z"
+      }
+    },
+    "agents": {
+      "legacy-cartographer": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.087Z",
+        "catalogPath": "agents/legacy-cartographer",
+        "hash": "5336978adbcee8a794d93d4c7402dfbf8582dd8cb5ad255a9cde73dca1f58775",
+        "updatedAt": "2026-04-21T21:59:56.087Z"
+      },
+      "requirement-analyzer": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.139Z",
+        "catalogPath": "agents/requirement-analyzer",
+        "hash": "c89a484eeae8f7c4180ac4b7fe46ca9e0e9eecbc98d8c252c5ab4be7a7899f65",
+        "updatedAt": "2026-04-21T21:59:56.139Z"
+      },
+      "task-executor": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.189Z",
+        "catalogPath": "agents/task-executor",
+        "hash": "56dca43037ddfff835d0eaec7e1b4407450c6426dd27d5a618b8543ece6092d8",
+        "updatedAt": "2026-04-21T21:59:56.189Z"
+      },
+      "code-reviewer": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.238Z",
+        "catalogPath": "agents/code-reviewer",
+        "hash": "a5eff4e7038bb44f497cbc9ad30e09ed25e32078a2c159983e00f0726023ede1",
+        "updatedAt": "2026-04-21T21:59:56.238Z"
+      },
+      "architect": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.291Z",
+        "catalogPath": "agents/architect",
+        "hash": "a58c97014094c2caff73ebd2bc92771b9a23c7c38374351e9aa06287cb22c9ec",
+        "updatedAt": "2026-04-21T21:59:56.291Z"
+      },
+      "quality-guardian": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.341Z",
+        "catalogPath": "agents/quality-guardian",
+        "hash": "7ba45096b8994814f22f1254e2f840d33e664650b03e15a1ce27c7680e19171c",
+        "updatedAt": "2026-04-21T21:59:56.341Z"
+      },
+      "security-auditor": {
+        "marketplace": "official",
+        "customized": false,
+        "installedAt": "2026-04-21T21:59:56.391Z",
+        "catalogPath": "agents/security-auditor",
+        "hash": "454bde867df725a36f1bb854dfd64ae74fe87811140148516bf2db89d531e994",
+        "updatedAt": "2026-04-21T21:59:56.391Z"
+      }
+    },
+    "workflows": {}
+  },
+  "promotions": {},
+  "overrides": {},
+  "onboarded": true,
+  "onboardedAt": "2026-04-21T21:56:01.394Z"
+}

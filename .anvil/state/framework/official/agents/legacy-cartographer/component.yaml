@@ -1,0 +1,18 @@
+schema: anvil.component/v1
+type: agent
+name: legacy-cartographer
+title: Legacy Cartographer
+version: 0.1.0
+description: Explores opaque legacy codebases and produces a sourced cartography (YAML) consumed by generate-project-wiki
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+    model: sonnet
+    tools: Read, Grep, Glob, Bash
+    permissionMode: plan
+  cursor:
+    supported: true
+entry:
+  file: index.md

@@ -1,0 +1,19 @@
+schema: anvil.component/v1
+type: agent
+name: requirement-analyzer
+title: Requirement Analyzer
+version: 0.1.0
+description: Analyzes tickets and produces structured briefs
+targets:
+  copilot:
+    supported: true
+    tools: ['read', 'search']
+  claude:
+    supported: true
+    model: sonnet
+    tools: Read, Grep, Glob, Bash
+    permissionMode: plan
+  cursor:
+    supported: true
+entry:
+  file: index.md

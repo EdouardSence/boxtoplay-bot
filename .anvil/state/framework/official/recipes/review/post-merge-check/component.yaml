@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: review/post-merge-check
+title: Review/post Merge Check
+version: 0.1.0
+description: Post-merge health check
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

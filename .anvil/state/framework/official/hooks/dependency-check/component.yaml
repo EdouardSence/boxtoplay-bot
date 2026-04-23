@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: hook
+name: dependency-check
+title: Dependency Check
+version: 0.1.0
+description: Check for outdated or vulnerable dependencies
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

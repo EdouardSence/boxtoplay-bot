@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: systematic-debugging
+title: Systematic Debugging
+version: 0.1.0
+description: 4-phase root cause analysis — investigate before fixing, never guess
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

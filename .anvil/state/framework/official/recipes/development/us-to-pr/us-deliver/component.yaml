@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: development/us-to-pr/us-deliver
+title: Development/us To Pr/us Deliver
+version: 0.1.0
+description: US Delivery — Final Phase (GH-AW split)
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

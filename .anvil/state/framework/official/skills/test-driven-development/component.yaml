@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: test-driven-development
+title: Test-Driven Development
+version: 0.1.0
+description: RED-GREEN-REFACTOR cycle — write failing test first, minimal code to pass, then refactor
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

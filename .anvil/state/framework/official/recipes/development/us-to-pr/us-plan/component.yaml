@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: development/us-to-pr/us-plan
+title: Development/us To Pr/us Plan
+version: 0.1.0
+description: US Plan — Phase 2 (GH-AW split)
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

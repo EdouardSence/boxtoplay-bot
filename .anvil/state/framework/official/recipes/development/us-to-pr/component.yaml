@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: development/us-to-pr
+title: Development/us To Pr
+version: 0.1.0
+description: Issue to PR workflow (with checkpoints)
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

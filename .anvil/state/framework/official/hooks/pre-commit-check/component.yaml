@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: hook
+name: pre-commit-check
+title: Pre-Commit Check
+version: 0.1.0
+description: Verify lint, tests, and no secrets before each commit
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

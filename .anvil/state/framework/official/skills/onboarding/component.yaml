@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: onboarding
+title: Onboarding
+version: 0.1.0
+description: Intelligent project setup and configuration
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

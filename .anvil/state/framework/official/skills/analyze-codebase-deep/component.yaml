@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: analyze-codebase-deep
+title: Deep Codebase Analysis
+version: 0.1.0
+description: 4-layer method to analyze a legacy codebase with minimal AI cost — inventory, topology, patterns, semantic
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

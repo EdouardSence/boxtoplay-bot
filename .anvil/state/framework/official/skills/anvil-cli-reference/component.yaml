@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: anvil-cli-reference
+title: Anvil CLI Reference
+version: 0.4.0
+description: Complete anvil CLI command reference for AI agents
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

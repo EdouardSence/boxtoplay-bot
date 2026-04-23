@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: generate-project-wiki
+title: Generate Project Wiki
+version: 0.1.0
+description: Transforms a cartography YAML into a navigable, sourced, page-by-page validated wiki under .anvil/wiki/
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

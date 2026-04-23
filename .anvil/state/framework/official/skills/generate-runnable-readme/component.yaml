@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: generate-runnable-readme
+title: Generate Runnable README
+version: 0.1.0
+description: Produces a "clone, install, run" README at .anvil/wiki/01-getting-started/README.md, mentally tested with the user
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

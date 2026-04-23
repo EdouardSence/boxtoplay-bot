@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: skill
+name: verification-before-completion
+title: Verification Before Completion
+version: 0.1.0
+description: Evidence before claims — run verification commands before declaring work complete
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

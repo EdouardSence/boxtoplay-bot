@@ -1,0 +1,17 @@
+schema: anvil.component/v1
+type: agent
+name: quality-guardian
+title: Quality Guardian
+version: 0.1.0
+description: Audits code quality — complexity, duplication, technical debt, test coverage
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+    model: sonnet
+    tools: Read, Grep, Glob, Bash
+  cursor:
+    supported: true
+entry:
+  file: index.md

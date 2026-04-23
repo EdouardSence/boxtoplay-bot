@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: development/us-to-pr/us-analyze
+title: Development/us To Pr/us Analyze
+version: 0.1.0
+description: US Analysis — Phase 1 (GH-AW split)
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md

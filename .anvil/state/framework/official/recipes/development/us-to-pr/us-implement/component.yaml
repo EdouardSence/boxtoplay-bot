@@ -1,0 +1,15 @@
+schema: anvil.component/v1
+type: recipe
+name: development/us-to-pr/us-implement
+title: Development/us To Pr/us Implement
+version: 0.1.0
+description: US Implementation — Phase 3 (GH-AW split)
+targets:
+  copilot:
+    supported: true
+  claude:
+    supported: true
+  cursor:
+    supported: true
+entry:
+  file: index.md
