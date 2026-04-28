@@ -408,7 +408,10 @@ async function extractAndUpdateCookies(page, accountIndex) {
 // ==========================================
 // 4. BOUCLE DE MAINTIEN (KeepAlive)
 // ==========================================
-let keepAliveCycleRunning = false;
+let keepAliveLockTimestamp = 0;
+const KEEPALIVE_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
+const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
+const BROWSER_CLOSE_TIMEOUT_MS = 5000; // 5s timeout for browser.close()
 
 async function checkAccount(account, index) {
     if (!account.cookies[SESSION_COOKIE_KEY]) {
@@ -488,14 +491,49 @@ async function checkAccount(account, index) {
     }
 }
 
+/**
+ * Wrapper non-bloquant pour BROWSER.close() avec timeout.
+ * Force la liberation si close() bloque plus de 5 secondes.
+ */
+async function closeBrowserWithTimeout() {
+    if (!BROWSER || !BROWSER.connected) {
+        BROWSER = null;
+        return;
+    }
+
+    try {
+        await Promise.race([
+            BROWSER.close(),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Browser close timeout')), BROWSER_CLOSE_TIMEOUT_MS)
+            ),
+        ]);
+        log('INFO', 'Browser', 'Chrome ferme (fin de cycle).');
+    } catch (e) {
+        log('WARN', 'Browser', `Timeout ou erreur close(): ${e.message}, force nullification.`);
+    } finally {
+        BROWSER = null;
+    }
+}
+
 async function runKeepAliveCycle() {
-    // Protection contre le chevauchement des cycles
-    if (keepAliveCycleRunning) {
+    // Anti-deadlock: detecter si un cycle precede est bloque depuis plus de 10 minutes
+    if (keepAliveLockTimestamp > 0 && Date.now() - keepAliveLockTimestamp > KEEPALIVE_LOCK_TIMEOUT_MS) {
+        log('WARN', 'KeepAlive', 'Verrou bloque depuis >10min, force reinitialisation.');
+        keepAliveLockTimestamp = 0;
+        if (BROWSER && BROWSER.connected) {
+            try { BROWSER.close(); } catch {}
+        }
+        BROWSER = null;
+    }
+
+    // Protection contre le chevauchement des cycles (verrou simple)
+    if (keepAliveLockTimestamp > 0) {
         log('WARN', 'KeepAlive', 'Cycle precedent encore en cours, skip.');
         return;
     }
 
-    keepAliveCycleRunning = true;
+    keepAliveLockTimestamp = Date.now();
     try {
         // Recharger le state depuis le Gist pour integrer les changements du worker
         await loadFromGist();
@@ -518,14 +556,8 @@ async function runKeepAliveCycle() {
     } finally {
         // Fermer Chrome apres chaque cycle pour liberer la memoire (Render free = 512MB)
         // getBrowser() le relancera au prochain cycle
-        if (BROWSER) {
-            try {
-                await BROWSER.close();
-                log('INFO', 'Browser', 'Chrome ferme (fin de cycle).');
-            } catch {}
-            BROWSER = null;
-        }
-        keepAliveCycleRunning = false;
+        await closeBrowserWithTimeout();
+        keepAliveLockTimestamp = 0;
     }
 }
 
@@ -551,8 +583,18 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 async function updatePresence() {
     try {
-        // Eviter la concurrence avec le cycle keepalive (qui ferme Chrome en fin de cycle)
-        if (keepAliveCycleRunning) {
+        // Anti-deadlock: verifier si le cycle keepalive est bloque
+        if (keepAliveLockTimestamp > 0 && Date.now() - keepAliveLockTimestamp > KEEPALIVE_LOCK_TIMEOUT_MS) {
+            log('WARN', 'Presence', 'Verrou bloque dans updatePresence, reset et reinitialisation.');
+            keepAliveLockTimestamp = 0;
+            if (BROWSER && BROWSER.connected) {
+                try { BROWSER.close(); } catch {}
+                BROWSER = null;
+            }
+        }
+
+        // Eviter la concurrence avec le cycle keepalive (verrou timestamp)
+        if (keepAliveLockTimestamp > 0) {
             client.user.setActivity(statusMessage);
             return;
         }
@@ -608,11 +650,17 @@ async function updatePresence() {
 
             data = await page.evaluate(async (urls) => {
                 async function fetchText(url) {
-                    const response = await fetch(url, { credentials: 'include' });
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status} sur ${url}`);
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 15000);
+                    try {
+                        const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status} sur ${url}`);
+                        }
+                        return (await response.text()).trim();
+                    } finally {
+                        clearTimeout(timeoutId);
                     }
-                    return (await response.text()).trim();
                 }
 
                 const [status, onlinePlayers, memoryUsage, cpuUsage] = await Promise.all([
