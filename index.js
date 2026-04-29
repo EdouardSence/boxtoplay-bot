@@ -90,9 +90,6 @@ const GIST_ID = process.env.GIST_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO;
 const IP_DNS = process.env.IP_DNS || 'orny';
-const FTP_HOST = process.env.FTP_HOST;
-const FTP_USERNAME = process.env.FTP_USERNAME;
-const FTP_PASSWORD = process.env.FTP_PASSWORD;
 const STATS_LOCAL_DIR = path.join(__dirname, 'stats_cache');
 
 // ==========================================
@@ -793,8 +790,18 @@ function formatPlayTime(seconds) {
  * Retourne la liste des fichiers telecharges
  */
 async function syncStatsFromFTP() {
-    if (!FTP_HOST || !FTP_USERNAME || !FTP_PASSWORD) {
-        throw new Error('Configuration FTP manquante (FTP_HOST, FTP_USERNAME, FTP_PASSWORD)');
+    if (!LOCAL_STATE) {
+        throw new Error('State non charge');
+    }
+
+    const activeIndex = LOCAL_STATE.active_account_index;
+    const account = LOCAL_STATE.accounts[activeIndex];
+    const ftpHost = account?.ftp_host;
+    const ftpUser = account?.ftp_user;
+    const ftpPassword = LOCAL_STATE.ftp_password;
+
+    if (!ftpHost || !ftpUser || !ftpPassword) {
+        throw new Error('Configuration FTP manquante dans le Gist');
     }
 
     // Creer le dossier local si inexistant
@@ -806,8 +813,8 @@ async function syncStatsFromFTP() {
     client.ftp.verbose = false;
 
     try {
-        await client.connect(FTP_HOST, 21);
-        await client.login(FTP_USERNAME, FTP_PASSWORD);
+        await client.connect(ftpHost, 21);
+        await client.login(ftpUser, ftpPassword);
 
         // Naviguer vers le dossier stats (chemin a adapter selon le serveur)
         // Essayer plusieurs chemins possibles
@@ -1025,9 +1032,9 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'time') {
         await interaction.deferReply();
 
-        // Verifier la config FTP
-        if (!FTP_HOST || !FTP_USERNAME || !FTP_PASSWORD) {
-            return interaction.editReply('❌ Configuration FTP manquante. Verifiez les variables d\'environnement.');
+        // Verifier que le state est charge
+        if (!LOCAL_STATE) {
+            return interaction.editReply('❌ State non charge. Reessayez dans quelques secondes.');
         }
 
         try {
