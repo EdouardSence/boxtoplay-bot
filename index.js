@@ -90,6 +90,10 @@ const GIST_ID = process.env.GIST_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO;
 const IP_DNS = process.env.IP_DNS || 'orny';
+const FTP_HOST = process.env.FTP_HOST;
+const FTP_USERNAME = process.env.FTP_USERNAME;
+const FTP_PASSWORD = process.env.FTP_PASSWORD;
+const STATS_LOCAL_DIR = path.join(__dirname, 'stats_cache');
 
 // ==========================================
 // INSTALLATION CHROME SECURISEE
@@ -153,6 +157,7 @@ const axios = require('axios');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const express = require('express');
+const ftp = require('basic-ftp');
 
 puppeteer.use(StealthPlugin());
 
@@ -572,6 +577,7 @@ const commands = [
     new SlashCommandBuilder().setName('status').setDescription('Statut du serveur Minecraft (online/offline)'),
     new SlashCommandBuilder().setName('players').setDescription('Liste des joueurs connectes'),
     new SlashCommandBuilder().setName('rotate').setDescription('Declenche la rotation via GitHub Actions'),
+    new SlashCommandBuilder().setName('time').setDescription('Classement des temps de jeu des joueurs'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -760,6 +766,156 @@ async function triggerGitHubAction() {
     }
 }
 
+// ==========================================
+// 7. FONCTIONS FTP & TIME COMMAND
+// ==========================================
+
+/**
+ * Formate les secondes en format lisible (j h m s)
+ */
+function formatPlayTime(seconds) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+
+    const parts = [];
+    if (days > 0) parts.push(`${days}j`);
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
+
+    return parts.join(' ');
+}
+
+/**
+ * Synchronise les fichiers stats depuis le serveur FTP
+ * Retourne la liste des fichiers telecharges
+ */
+async function syncStatsFromFTP() {
+    if (!FTP_HOST || !FTP_USERNAME || !FTP_PASSWORD) {
+        throw new Error('Configuration FTP manquante (FTP_HOST, FTP_USERNAME, FTP_PASSWORD)');
+    }
+
+    // Creer le dossier local si inexistant
+    if (!fs.existsSync(STATS_LOCAL_DIR)) {
+        fs.mkdirSync(STATS_LOCAL_DIR, { recursive: true });
+    }
+
+    const client = new ftp.Client();
+    client.ftp.verbose = false;
+
+    try {
+        await client.connect(FTP_HOST, 21);
+        await client.login(FTP_USERNAME, FTP_PASSWORD);
+
+        // Naviguer vers le dossier stats (chemin a adapter selon le serveur)
+        // Essayer plusieurs chemins possibles
+        const possiblePaths = ['world/stats', 'minecraft/world/stats', './world/stats'];
+        let statsPath = null;
+
+        for (const p of possiblePaths) {
+            try {
+                await client.cd(p);
+                statsPath = p;
+                break;
+            } catch {
+                // Chemin non valide, passer au suivant
+            }
+        }
+
+        if (!statsPath) {
+            throw new Error('Dossier stats non trouve sur le serveur FTP');
+        }
+
+        log('INFO', 'FTP', `Connecte, dossier: ${statsPath}`);
+
+        // Liste des fichiers distants
+        const remoteFiles = await client.list();
+        const jsonFiles = remoteFiles.filter(f => f.name.endsWith('.json'));
+
+        let downloadedCount = 0;
+
+        for (const file of jsonFiles) {
+            const localPath = path.join(STATS_LOCAL_DIR, file.name);
+            const remoteMtime = file.modifiedAt;
+
+            // Verifier si le fichier local existe et est plus recent
+            let needsDownload = true;
+            if (fs.existsSync(localPath)) {
+                const localStat = fs.statSync(localPath);
+                // Telecharger seulement si le fichier distant est plus recent (difference > 1 seconde)
+                if (localStat.mtime >= new Date(remoteMtime.getTime() - 1000)) {
+                    needsDownload = false;
+                }
+            }
+
+            if (needsDownload) {
+                await client.download(localPath, file.name);
+                downloadedCount++;
+            }
+        }
+
+        log('INFO', 'FTP', `${downloadedCount} fichier(s) telecharge(s)/mis a jour(s)`);
+        return downloadedCount;
+
+    } finally {
+        client.close();
+    }
+}
+
+/**
+ * Recupere le temps de jeu de tous les joueurs depuis les fichiers locaux
+ */
+async function getPlayerPlayTimes() {
+    if (!fs.existsSync(STATS_LOCAL_DIR)) {
+        return [];
+    }
+
+    const files = fs.readdirSync(STATS_LOCAL_DIR);
+    const playerStats = [];
+
+    for (const file of files) {
+        if (file.endsWith('.json')) {
+            const uuid = file.replace('.json', '');
+            const filePath = path.join(STATS_LOCAL_DIR, file);
+
+            try {
+                const content = fs.readFileSync(filePath, 'utf8');
+                const stats = JSON.parse(content);
+
+                // Recuperer le temps de jeu en ticks
+                const playTimeTicks = stats?.stats?.["minecraft:custom"]?.["minecraft:play_time"] || 0;
+                // Conversion: 1 tick = 0.05 seconde
+                const playTimeSeconds = playTimeTicks * 0.05;
+
+                playerStats.push({ uuid, playTimeSeconds });
+            } catch (e) {
+                log('WARN', 'Stats', `Erreur lecture ${file}: ${e.message}`);
+            }
+        }
+    }
+
+    // Trier par temps de jeu decroissant
+    playerStats.sort((a, b) => b.playTimeSeconds - a.playTimeSeconds);
+    return playerStats;
+}
+
+/**
+ * Recupere le nom du joueur depuis l'API Mojang
+ */
+async function fetchPlayerName(uuid) {
+    try {
+        const response = await axios.get(
+            `https://api.minecraftservices.com/minecraft/profile/lookup/${uuid}`,
+            { timeout: 10000 }
+        );
+        return response.data.name || null;
+    } catch {
+        return null;
+    }
+}
+
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
@@ -853,16 +1009,81 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(lines.join('\n'));
     }
 
-    // --- /rotate ---
+// --- /rotate ---
     if (commandName === 'rotate') {
         await interaction.deferReply();
 
         const dispatched = await triggerGitHubAction();
         if (dispatched) {
-            return interaction.editReply('✅ Rotation lancée sur GitHub Actions !');
+            return interaction.editReply('✅ Rotation lancee sur GitHub Actions !');
         }
 
         return interaction.editReply('❌ Impossible de lancer la rotation sur GitHub Actions.');
+    }
+
+    // --- /time ---
+    if (commandName === 'time') {
+        await interaction.deferReply();
+
+        // Verifier la config FTP
+        if (!FTP_HOST || !FTP_USERNAME || !FTP_PASSWORD) {
+            return interaction.editReply('❌ Configuration FTP manquante. Verifiez les variables d\'environnement.');
+        }
+
+        try {
+            // Synchroniser les fichiers stats depuis le FTP
+            await interaction.editReply('🔄 Synchronisation des donnees de temps de jeu...');
+            const downloaded = await syncStatsFromFTP();
+
+            if (downloaded === 0) {
+                // Verifier si on a des fichiers locaux
+                const players = await getPlayerPlayTimes();
+                if (players.length === 0) {
+                    return interaction.editReply('Aucun fichier de stats trouve sur le serveur.');
+                }
+            }
+
+            // Recuperer les temps de jeu
+            const playerStats = await getPlayerPlayTimes();
+
+            if (playerStats.length === 0) {
+                return interaction.editReply('Aucun joueur trouve.');
+            }
+
+            // Recuperer les noms des joueurs (en parallele pour la vitesse)
+            const playerDetails = await Promise.all(
+                playerStats.slice(0, 10).map(async (player) => {
+                    const name = await fetchPlayerName(player.uuid);
+                    return {
+                        name: name || `Joueur (${player.uuid.substring(0, 8)}...)`,
+                        formattedTime: formatPlayTime(player.playTimeSeconds),
+                        seconds: player.playTimeSeconds
+                    };
+                })
+            );
+
+            // Creer l'embed Discord
+            const embed = {
+                color: 0x0099ff,
+                title: '⏱️ Temps de jeu sur le serveur',
+                description: `Classement des ${playerDetails.length} premiers joueurs${downloaded > 0 ? ` (${downloaded} fichier(s) mis a jour)` : ''}:`,
+                fields: playerDetails.map((player, index) => ({
+                    name: `#${index + 1} ${player.name}`,
+                    value: player.formattedTime,
+                    inline: false
+                })),
+                timestamp: new Date().toISOString(),
+                footer: {
+                    text: 'Temps de jeu calcule depuis les donnees du serveur'
+                }
+            };
+
+            return interaction.editReply({ content: null, embeds: [embed] });
+
+        } catch (error) {
+            log('ERROR', 'Time', `Erreur: ${error.message}`);
+            return interaction.editReply(`❌ Erreur lors de la recuperation des temps de jeu: ${error.message}`);
+        }
     }
 });
 
