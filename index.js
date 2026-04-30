@@ -852,7 +852,8 @@ async function syncStatsFromFTP() {
             if (fs.existsSync(localPath)) {
                 const localStat = fs.statSync(localPath);
                 // Telecharger seulement si le fichier distant est plus recent (difference > 1 seconde)
-                if (localStat.mtime >= new Date(remoteMtime.getTime() - 1000)) {
+                // Safety: verifier que remoteMtime est defini et convertible
+                if (remoteMtime && localStat.mtime >= new Date(remoteMtime).getTime() - 1000) {
                     needsDownload = false;
                 }
             }
