@@ -847,13 +847,25 @@ async function syncStatsFromFTP() {
             const localPath = path.join(STATS_LOCAL_DIR, file.name);
             const remoteMtime = file.modifiedAt;
 
+            // Safety: valider que remoteMtime est une date valide avant de l'utiliser
+            let remoteMtimeMs = null;
+            if (remoteMtime) {
+                try {
+                    const parsed = new Date(remoteMtime).getTime();
+                    if (!isNaN(parsed)) {
+                        remoteMtimeMs = parsed;
+                    }
+                } catch (e) {
+                    log('WARN', 'FTP', `Date invalide pour ${file.name}: ${remoteMtime}`);
+                }
+            }
+
             // Verifier si le fichier local existe et est plus recent
             let needsDownload = true;
-            if (fs.existsSync(localPath)) {
+            if (fs.existsSync(localPath) && remoteMtimeMs !== null) {
                 const localStat = fs.statSync(localPath);
                 // Telecharger seulement si le fichier distant est plus recent (difference > 1 seconde)
-                // Safety: verifier que remoteMtime est defini et convertible
-                if (remoteMtime && localStat.mtime >= new Date(remoteMtime).getTime() - 1000) {
+                if (localStat.mtime.getTime() >= remoteMtimeMs - 1000) {
                     needsDownload = false;
                 }
             }
