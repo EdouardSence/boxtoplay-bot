@@ -596,6 +596,13 @@ async function updatePresence() {
             }
         }
 
+        // Verifier si une rotation est en cours
+        const workflowInProgress = await isWorkflowInProgress();
+        if (workflowInProgress) {
+            client.user.setActivity('🔄 Rotation en cours...');
+            return;
+        }
+
         // Eviter la concurrence avec le cycle keepalive (verrou timestamp)
         if (keepAliveLockTimestamp > 0) {
             client.user.setActivity(statusMessage);
@@ -759,6 +766,33 @@ async function triggerGitHubAction() {
         const status = error.response?.status;
         const details = error.response?.data || error.message;
         log('ERROR', 'Rotate', `Echec declenchement GitHub Actions${status ? ` (HTTP ${status})` : ''}`, details);
+        return false;
+    }
+}
+
+/**
+ * Verifie si un workflow GitHub Actions est en cours pour le repo configure
+ */
+async function isWorkflowInProgress() {
+    try {
+        const response = await axios.get(
+            `https://api.github.com/repos/${GITHUB_REPO}/actions/runs?per_page=1`,
+            {
+                headers: {
+                    Authorization: `token ${GH_TOKEN}`,
+                    Accept: 'application/vnd.github.v3+json',
+                },
+                timeout: 10000,
+            }
+        );
+
+        if (response.data?.workflow_runs?.length > 0) {
+            const latestRun = response.data.workflow_runs[0];
+            return latestRun.status === 'in_progress' || latestRun.status === 'queued';
+        }
+        return false;
+    } catch (error) {
+        log('WARN', 'Workflow', `Erreur verification status: ${error.message}`);
         return false;
     }
 }
