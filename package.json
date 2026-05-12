@@ -4,9 +4,7 @@
   "description": "Bot Discord BoxToPlay Stateless",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "build": "npm install && npx puppeteer browsers install chrome",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.4.0",
