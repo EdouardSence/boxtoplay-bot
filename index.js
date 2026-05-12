@@ -153,7 +153,11 @@ function findChromeRecursive(dir) {
 
         if (!chromePath) {
             log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
-            execSync('npx puppeteer browsers install chrome', { stdio: 'inherit', timeout: TIMINGS.CHROME_INSTALL_TIMEOUT });
+            // Strip PUPPETEER_SKIP_DOWNLOAD from child env — puppeteer CLI skips download
+            // when this var is set, even for explicit `browsers install` calls.
+            const installEnv = { ...process.env };
+            delete installEnv.PUPPETEER_SKIP_DOWNLOAD;
+            execSync('npx puppeteer browsers install chrome', { stdio: 'inherit', timeout: TIMINGS.CHROME_INSTALL_TIMEOUT, env: installEnv });
             chromePath = findChromeBinary();
         }
 
