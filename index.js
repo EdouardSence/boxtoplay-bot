@@ -121,39 +121,51 @@ function findChromeRecursive(dir) {
 
 (function installChrome() {
     try {
-        const cacheDirs = [
-            process.env.PUPPETEER_CACHE_DIR,
-            '/opt/render/.cache/puppeteer',
-            path.join(os.homedir(), '.cache', 'puppeteer'),
-        ].filter(Boolean);
+        function getCacheDirs() {
+            return [
+                process.env.PUPPETEER_CACHE_DIR,
+                '/opt/render/.cache/puppeteer',
+                path.join(os.homedir(), '.cache', 'puppeteer'),
+            ].filter(Boolean);
+        }
 
-        let found = false;
-        for (const dir of cacheDirs) {
-            if (!fs.existsSync(dir)) continue;
-
-            const chromePath = findChromeRecursive(dir);
-            if (chromePath) {
-                log('INFO', 'Chrome', `Chrome trouve: ${chromePath}`);
-                found = true;
-                break;
+        function findChromeBinary() {
+            for (const dir of getCacheDirs()) {
+                if (!fs.existsSync(dir)) continue;
+                const p = findChromeRecursive(dir);
+                if (p) return p;
             }
+            return null;
+        }
 
-            // dir exists but no chrome binary — corrupted cache (folder present, binary missing)
-            // clean it so the installer can proceed without "exists but executable missing" error
+        // Clean corrupted cache dirs: dir exists but no binary
+        for (const dir of getCacheDirs()) {
+            if (!fs.existsSync(dir)) continue;
+            if (findChromeRecursive(dir)) continue;
             const chromeSubdir = path.join(dir, 'chrome');
             if (fs.existsSync(chromeSubdir)) {
-                log('WARN', 'Chrome', `Cache Chrome corrompu dans ${chromeSubdir}, nettoyage...`);
+                log('WARN', 'Chrome', `Cache corrompu dans ${chromeSubdir}, nettoyage...`);
                 fs.rmSync(chromeSubdir, { recursive: true, force: true });
             }
         }
 
-        if (!found) {
-            log('INFO', 'Chrome', 'Chrome non trouve, telechargement (~1-2 min)...');
+        let chromePath = findChromeBinary();
+
+        if (!chromePath) {
+            log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
             execSync('npx puppeteer browsers install chrome', { stdio: 'inherit', timeout: TIMINGS.CHROME_INSTALL_TIMEOUT });
-            log('INFO', 'Chrome', 'Chrome installe.');
+            chromePath = findChromeBinary();
+        }
+
+        if (chromePath) {
+            // Set explicitly so puppeteer.launch() finds it regardless of internal config
+            process.env.PUPPETEER_EXECUTABLE_PATH = chromePath;
+            log('INFO', 'Chrome', `Chrome pret: ${chromePath}`);
+        } else {
+            log('ERROR', 'Chrome', 'Chrome introuvable apres installation.');
         }
     } catch (e) {
-        log('ERROR', 'Chrome', `Erreur installation Chrome (le bot continuera sans Chrome): ${e.message}`);
+        log('ERROR', 'Chrome', `Erreur installation Chrome: ${e.message}`);
     }
 })();
 
