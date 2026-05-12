@@ -244,6 +244,18 @@ async function loadFromGist() {
 
 async function saveToGist() {
     if (!GIST_FILENAME || !LOCAL_STATE) return;
+
+    // Guard: detect cookie collision before any write
+    if (LOCAL_STATE.accounts.length >= 2) {
+        const s0 = LOCAL_STATE.accounts[0]?.cookies?.[SESSION_COOKIE_KEY];
+        const s1 = LOCAL_STATE.accounts[1]?.cookies?.[SESSION_COOKIE_KEY];
+        if (s0 && s1 && s0 === s1) {
+            const msg = 'ALERTE CRITIQUE: Collision de cookies détectée ! Annulation de la sauvegarde Gist pour protéger la data.';
+            log('ERROR', 'Gist', msg);
+            throw new Error(msg);
+        }
+    }
+
     try {
         await withRetry(
             () => axios.patch(URLS.GITHUB_GIST(GIST_ID), {
@@ -254,6 +266,7 @@ async function saveToGist() {
         log('INFO', 'Gist', 'State sauvegarde.');
     } catch (error) {
         log('ERROR', 'Gist', `Erreur sauvegarde: ${error.message}`);
+        throw error;
     }
 }
 
@@ -428,12 +441,13 @@ async function checkAccount(account, index) {
         await page.setUserAgent(USER_AGENT);
         await page.setViewport({ width: 1366, height: 768 });
 
-        // Nettoyer TOUS les cookies avant d'injecter ceux de ce compte
-        // (isole les comptes sans utiliser createBrowserContext qui crash sur Render)
-        const existingCookies = await page.cookies(`https://${COOKIE_DOMAIN}`);
-        if (existingCookies.length > 0) {
-            await page.deleteCookie(...existingCookies);
-        }
+        // Nuke ALL cookies from the shared browser context via CDP.
+        // page.cookies(url)+deleteCookie() is scoped to a URL and misses cookies
+        // with domain `.boxtoplay.com` (dot-prefix) — those leak between accounts.
+        // Network.clearBrowserCookies has no such limitation.
+        const cdpSession = await page.createCDPSession();
+        await cdpSession.send('Network.clearBrowserCookies');
+        await cdpSession.detach();
 
         // Injecter les cookies AVANT de naviguer (inclut cf_clearance pour bypass Cloudflare)
         await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
@@ -632,10 +646,9 @@ async function updatePresence() {
             await page.setUserAgent(USER_AGENT);
             await page.setViewport({ width: 1366, height: 768 });
 
-            const existingCookies = await page.cookies(`https://${COOKIE_DOMAIN}`);
-            if (existingCookies.length > 0) {
-                await page.deleteCookie(...existingCookies);
-            }
+            const cdpSession = await page.createCDPSession();
+            await cdpSession.send('Network.clearBrowserCookies');
+            await cdpSession.detach();
 
             await injectCookies(page, cookieHeader);
 
