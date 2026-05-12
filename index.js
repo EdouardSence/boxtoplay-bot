@@ -124,6 +124,7 @@ function findChromeRecursive(dir) {
         function getCacheDirs() {
             return [
                 process.env.PUPPETEER_CACHE_DIR,
+                '/tmp/puppeteer',
                 '/opt/render/.cache/puppeteer',
                 path.join(os.homedir(), '.cache', 'puppeteer'),
             ].filter(Boolean);
@@ -153,12 +154,45 @@ function findChromeRecursive(dir) {
 
         if (!chromePath) {
             log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
-            // Strip PUPPETEER_SKIP_DOWNLOAD from child env — puppeteer CLI skips download
-            // when this var is set, even for explicit `browsers install` calls.
             const installEnv = { ...process.env };
             delete installEnv.PUPPETEER_SKIP_DOWNLOAD;
-            execSync('npx puppeteer browsers install chrome', { stdio: 'inherit', timeout: TIMINGS.CHROME_INSTALL_TIMEOUT, env: installEnv });
-            chromePath = findChromeBinary();
+            // Force explicit install path; capture stdout to parse the real binary dir.
+            const CHROME_INSTALL_DIR = '/tmp/puppeteer';
+            let installOutput = '';
+            try {
+                installOutput = execSync(
+                    `npx @puppeteer/browsers install chrome@stable --path ${CHROME_INSTALL_DIR}`,
+                    { timeout: TIMINGS.CHROME_INSTALL_TIMEOUT, env: installEnv, encoding: 'utf8' }
+                );
+                log('INFO', 'Chrome', `Install output: ${installOutput.trim()}`);
+            } catch (installErr) {
+                log('ERROR', 'Chrome', `Install command failed: ${installErr.message}`);
+            }
+
+            // Try to parse path from last line: "chrome@version /path/to/chrome-linux64"
+            const lines = installOutput.trim().split('\n').filter(Boolean);
+            const lastLine = lines[lines.length - 1] || '';
+            const parts = lastLine.trim().split(/\s+/);
+            if (parts.length >= 2) {
+                const candidate = path.join(parts[parts.length - 1], 'chrome');
+                if (fs.existsSync(candidate)) {
+                    chromePath = candidate;
+                    log('INFO', 'Chrome', `Chrome trouve via output parse: ${chromePath}`);
+                }
+            }
+
+            // Fallback: search known dirs
+            if (!chromePath) {
+                chromePath = findChromeBinary();
+            }
+
+            // Diagnostic: log what's in install dir if still not found
+            if (!chromePath) {
+                try {
+                    const listing = execSync(`find ${CHROME_INSTALL_DIR} -maxdepth 5 -type f 2>/dev/null | head -30`, { encoding: 'utf8', timeout: 5000 });
+                    log('WARN', 'Chrome', `Contenu de ${CHROME_INSTALL_DIR}:\n${listing || '(vide)'}`);
+                } catch { /* ignore */ }
+            }
         }
 
         if (chromePath) {
