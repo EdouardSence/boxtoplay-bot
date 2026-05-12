@@ -96,25 +96,34 @@ const STATS_LOCAL_DIR = path.join(__dirname, 'stats_cache');
 // INSTALLATION CHROME SECURISEE
 // ==========================================
 
+const CHROME_BINARY_NAMES = ['chrome-headless-shell', 'chrome'];
+
 /**
- * Recherche recursive securisee du binaire Chrome dans un repertoire.
- * Remplace l'appel shell `find` pour eviter les injections de commande.
+ * Recherche recursive du binaire Chrome dans un repertoire.
+ * Utilise fs.statSync pour suivre les liens symboliques.
  */
-function findChromeRecursive(dir) {
+function findChromeRecursive(dir, depth = 0) {
+    if (depth > 8) return null;
     try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
         for (const entry of entries) {
             const fullPath = path.join(dir, entry.name);
-            if (entry.isFile() && entry.name === 'chrome') {
-                return fullPath;
+            if (CHROME_BINARY_NAMES.includes(entry.name)) {
+                try {
+                    // statSync follows symlinks — catches both regular files and symlinked binaries
+                    if (fs.statSync(fullPath).isFile()) return fullPath;
+                } catch { /* skip */ }
             }
-            if (entry.isDirectory()) {
-                const result = findChromeRecursive(fullPath);
-                if (result) return result;
-            }
+            // Follow directories AND symlinks to directories
+            try {
+                if (fs.statSync(fullPath).isDirectory()) {
+                    const result = findChromeRecursive(fullPath, depth + 1);
+                    if (result) return result;
+                }
+            } catch { /* skip */ }
         }
     } catch {
-        // Ignore les erreurs de permission sur certains sous-dossiers
+        // Ignore permission errors
     }
     return null;
 }
@@ -139,14 +148,16 @@ function findChromeRecursive(dir) {
             return null;
         }
 
-        // Clean corrupted cache dirs: dir exists but no binary
+        // Clean corrupted cache dirs: dir exists but no binary inside
         for (const dir of getCacheDirs()) {
             if (!fs.existsSync(dir)) continue;
             if (findChromeRecursive(dir)) continue;
-            const chromeSubdir = path.join(dir, 'chrome');
-            if (fs.existsSync(chromeSubdir)) {
-                log('WARN', 'Chrome', `Cache corrompu dans ${chromeSubdir}, nettoyage...`);
-                fs.rmSync(chromeSubdir, { recursive: true, force: true });
+            for (const sub of ['chrome-headless-shell', 'chrome']) {
+                const subdir = path.join(dir, sub);
+                if (fs.existsSync(subdir)) {
+                    log('WARN', 'Chrome', `Cache corrompu dans ${subdir}, nettoyage...`);
+                    fs.rmSync(subdir, { recursive: true, force: true });
+                }
             }
         }
 
@@ -156,12 +167,12 @@ function findChromeRecursive(dir) {
             log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
             const installEnv = { ...process.env };
             delete installEnv.PUPPETEER_SKIP_DOWNLOAD;
-            // Force explicit install path; capture stdout to parse the real binary dir.
             const CHROME_INSTALL_DIR = '/tmp/puppeteer';
+            // Use chrome-headless-shell (~40 MB vs ~280 MB for full Chrome) — fits in /tmp.
             let installOutput = '';
             try {
                 installOutput = execSync(
-                    `npx @puppeteer/browsers install chrome@stable --path ${CHROME_INSTALL_DIR}`,
+                    `npx @puppeteer/browsers install chrome-headless-shell@stable --path ${CHROME_INSTALL_DIR}`,
                     { timeout: TIMINGS.CHROME_INSTALL_TIMEOUT, env: installEnv, encoding: 'utf8' }
                 );
                 log('INFO', 'Chrome', `Install output: ${installOutput.trim()}`);
@@ -169,27 +180,29 @@ function findChromeRecursive(dir) {
                 log('ERROR', 'Chrome', `Install command failed: ${installErr.message}`);
             }
 
-            // Try to parse path from last line: "chrome@version /path/to/chrome-linux64"
+            // Parse last line: "chrome-headless-shell@version /path/to/dir"
             const lines = installOutput.trim().split('\n').filter(Boolean);
             const lastLine = lines[lines.length - 1] || '';
             const parts = lastLine.trim().split(/\s+/);
             if (parts.length >= 2) {
-                const candidate = path.join(parts[parts.length - 1], 'chrome');
-                if (fs.existsSync(candidate)) {
-                    chromePath = candidate;
-                    log('INFO', 'Chrome', `Chrome trouve via output parse: ${chromePath}`);
+                for (const name of CHROME_BINARY_NAMES) {
+                    const candidate = path.join(parts[parts.length - 1], name);
+                    try {
+                        if (fs.statSync(candidate).isFile()) {
+                            chromePath = candidate;
+                            log('INFO', 'Chrome', `Chrome trouve via output parse: ${chromePath}`);
+                            break;
+                        }
+                    } catch { /* skip */ }
                 }
             }
 
-            // Fallback: search known dirs
-            if (!chromePath) {
-                chromePath = findChromeBinary();
-            }
+            if (!chromePath) chromePath = findChromeBinary();
 
-            // Diagnostic: log what's in install dir if still not found
+            // Diagnostic: show all files in install dir if still missing
             if (!chromePath) {
                 try {
-                    const listing = execSync(`find ${CHROME_INSTALL_DIR} -maxdepth 5 -type f 2>/dev/null | head -30`, { encoding: 'utf8', timeout: 5000 });
+                    const listing = execSync(`find ${CHROME_INSTALL_DIR} -maxdepth 5 2>/dev/null | head -40`, { encoding: 'utf8', timeout: 5000 });
                     log('WARN', 'Chrome', `Contenu de ${CHROME_INSTALL_DIR}:\n${listing || '(vide)'}`);
                 } catch { /* ignore */ }
             }
