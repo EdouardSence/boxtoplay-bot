@@ -167,8 +167,10 @@ function findChromeRecursive(dir, depth = 0) {
             log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
             const installEnv = { ...process.env };
             delete installEnv.PUPPETEER_SKIP_DOWNLOAD;
-            const CHROME_INSTALL_DIR = '/tmp/puppeteer';
-            // Use chrome-headless-shell (~40 MB vs ~280 MB for full Chrome) — fits in /tmp.
+            // Prefer PUPPETEER_CACHE_DIR (set to /opt/render/.cache/puppeteer on Render)
+            // which has more disk space than /tmp. Fall back to homedir cache.
+            const CHROME_INSTALL_DIR = process.env.PUPPETEER_CACHE_DIR
+                || path.join(os.homedir(), '.cache', 'puppeteer');
             let installOutput = '';
             try {
                 installOutput = execSync(
