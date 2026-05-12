@@ -129,13 +129,21 @@ function findChromeRecursive(dir) {
 
         let found = false;
         for (const dir of cacheDirs) {
-            if (fs.existsSync(dir)) {
-                const chromePath = findChromeRecursive(dir);
-                if (chromePath) {
-                    log('INFO', 'Chrome', `Chrome trouve: ${chromePath}`);
-                    found = true;
-                    break;
-                }
+            if (!fs.existsSync(dir)) continue;
+
+            const chromePath = findChromeRecursive(dir);
+            if (chromePath) {
+                log('INFO', 'Chrome', `Chrome trouve: ${chromePath}`);
+                found = true;
+                break;
+            }
+
+            // dir exists but no chrome binary — corrupted cache (folder present, binary missing)
+            // clean it so the installer can proceed without "exists but executable missing" error
+            const chromeSubdir = path.join(dir, 'chrome');
+            if (fs.existsSync(chromeSubdir)) {
+                log('WARN', 'Chrome', `Cache Chrome corrompu dans ${chromeSubdir}, nettoyage...`);
+                fs.rmSync(chromeSubdir, { recursive: true, force: true });
             }
         }
 
@@ -145,7 +153,7 @@ function findChromeRecursive(dir) {
             log('INFO', 'Chrome', 'Chrome installe.');
         }
     } catch (e) {
-        log('WARN', 'Chrome', `Erreur installation Chrome: ${e.message}`);
+        log('ERROR', 'Chrome', `Erreur installation Chrome (le bot continuera sans Chrome): ${e.message}`);
     }
 })();
 
