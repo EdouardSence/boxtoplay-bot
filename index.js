@@ -201,10 +201,39 @@ function findChromeRecursive(dir, depth = 0) {
 
             if (!chromePath) chromePath = findChromeBinary();
 
-            // Diagnostic: show all files in install dir if still missing
+            // @puppeteer/browsers Node.js unzip silently fails on large binary entries.
+            // Fallback: find the downloaded zip and extract with system unzip.
+            if (!chromePath) {
+                const shellsDir = path.join(CHROME_INSTALL_DIR, 'chrome-headless-shell');
+                try {
+                    const zips = fs.existsSync(shellsDir)
+                        ? fs.readdirSync(shellsDir).filter(f => f.endsWith('.zip'))
+                        : [];
+                    for (const zip of zips) {
+                        const zipPath = path.join(shellsDir, zip);
+                        const m = zip.match(/^([\d.]+)-chrome-headless-shell/);
+                        if (!m) continue;
+                        const extractTo = path.join(shellsDir, `linux-${m[1]}`);
+                        log('INFO', 'Chrome', `Extraction système (unzip): ${zip}`);
+                        try {
+                            const out = execSync(`unzip -o "${zipPath}" -d "${extractTo}" 2>&1`, { timeout: 60000, encoding: 'utf8' });
+                            log('INFO', 'Chrome', `unzip: ${out.slice(0, 200)}`);
+                            // Make binary executable
+                            execSync(`find "${extractTo}" -name 'chrome-headless-shell' -type f -exec chmod +x {} \\;`, { timeout: 5000 });
+                        } catch (uzErr) {
+                            log('ERROR', 'Chrome', `unzip echoue: ${uzErr.message.slice(0, 200)}`);
+                        }
+                    }
+                    chromePath = findChromeBinary();
+                } catch (fallbackErr) {
+                    log('ERROR', 'Chrome', `Fallback unzip erreur: ${fallbackErr.message}`);
+                }
+            }
+
+            // Diagnostic: show dir contents if still missing
             if (!chromePath) {
                 try {
-                    const listing = execSync(`find ${CHROME_INSTALL_DIR} -maxdepth 5 2>/dev/null | head -40`, { encoding: 'utf8', timeout: 5000 });
+                    const listing = execSync(`find "${CHROME_INSTALL_DIR}" -maxdepth 5 2>/dev/null | head -40`, { encoding: 'utf8', timeout: 5000 });
                     log('WARN', 'Chrome', `Contenu de ${CHROME_INSTALL_DIR}:\n${listing || '(vide)'}`);
                 } catch { /* ignore */ }
             }
