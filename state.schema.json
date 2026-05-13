@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "boxtoplay-gist-state",
+  "title": "BoxToPlay Gist State",
+  "description": "Contrat partagé entre boxtoplay-bot (JS) et boxtoplay-v2/worker.py (Python). Toute modification ici doit être reflétée dans les deux validateurs.",
+  "type": "object",
+  "required": ["accounts", "active_account_index"],
+  "additionalProperties": true,
+  "properties": {
+    "accounts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Liste ordonnée des comptes BoxToPlay gérés.",
+      "items": {
+        "type": "object",
+        "required": ["email", "cookies"],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "Adresse email du compte BoxToPlay."
+          },
+          "cookies": {
+            "type": "object",
+            "description": "Cookies de session. La clé principale est BOXTOPLAY_SESSION.",
+            "properties": {
+              "BOXTOPLAY_SESSION": {
+                "type": "string",
+                "description": "Cookie de session complet (format name=value; name=value)."
+              }
+            }
+          },
+          "server_id": {
+            "type": ["string", "null"],
+            "description": "ID du serveur BoxToPlay associé à ce compte. Optionnel."
+          },
+          "ftp_host": {
+            "type": ["string", "null"],
+            "description": "Hôte FTP du serveur BoxToPlay de ce compte."
+          },
+          "ftp_user": {
+            "type": ["string", "null"],
+            "description": "Utilisateur FTP du serveur BoxToPlay de ce compte."
+          }
+        }
+      }
+    },
+    "active_account_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Index (0-based) du compte actuellement actif dans le tableau accounts."
+    },
+    "current_server_id": {
+      "type": ["string", "null"],
+      "description": "ID du serveur Minecraft actuellement en rotation."
+    },
+    "modpack": {
+      "type": ["string", "null"],
+      "description": "Nom du modpack actif sur le serveur."
+    },
+    "ftp_password": {
+      "type": ["string", "null"],
+      "description": "Mot de passe FTP partagé entre les comptes. À migrer vers GitHub Secrets / Render Env (voir axe #8)."
+    },
+    "last_written_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Timestamp ISO 8601 de la dernière écriture. Utilisé pour détecter les écritures concurrentes entre bot et worker."
+    },
+    "rotation": {
+      "type": ["object", "null"],
+      "description": "Métadonnées de la dernière rotation effectuée par worker.py.",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pending", "in_progress", "success", "failure"],
+          "description": "Statut de la dernière rotation."
+        },
+        "started_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "error": {
+          "type": ["string", "null"],
+          "description": "Message d'erreur en cas d'échec."
+        }
+      }
+    }
+  }
+}

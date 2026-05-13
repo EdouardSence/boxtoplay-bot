@@ -267,6 +267,27 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (req, res) => res.send('Bot BoxToPlay V4 - Full Puppeteer'));
 app.get('/keep-alive', (req, res) => res.status(200).send('OK'));
+app.get('/health', (req, res) => {
+    const mem = process.memoryUsage();
+    const toMb = (bytes) => (bytes / 1024 / 1024).toFixed(1);
+    res.json({
+        status: 'ok',
+        uptime_s: Math.floor(process.uptime()),
+        memory: {
+            rss_mb: toMb(mem.rss),
+            heap_used_mb: toMb(mem.heapUsed),
+            heap_total_mb: toMb(mem.heapTotal),
+            external_mb: toMb(mem.external),
+        },
+        chrome: BROWSER && BROWSER.connected ? 'connected' : 'disconnected',
+        keepalive_locked: keepAliveLockTimestamp > 0,
+        keepalive_lock_age_s: keepAliveLockTimestamp > 0 ? Math.floor((Date.now() - keepAliveLockTimestamp) / 1000) : null,
+        state_loaded: LOCAL_STATE !== null,
+        accounts: LOCAL_STATE?.accounts?.length ?? null,
+        active_account: LOCAL_STATE?.accounts?.[LOCAL_STATE?.active_account_index]?.email ?? null,
+        last_written_at: LOCAL_STATE?.last_written_at ?? null,
+    });
+});
 const server = app.listen(PORT, () => log('INFO', 'Web', `Serveur Web sur le port ${PORT}`));
 
 // ==========================================
@@ -338,7 +359,7 @@ async function loadFromGist() {
         const parsed = JSON.parse(files[GIST_FILENAME].content);
         validateState(parsed);
         LOCAL_STATE = parsed;
-        log('INFO', 'Gist', `State charge: ${LOCAL_STATE.accounts.length} compte(s).`);
+        log('INFO', 'Gist', `State charge: ${LOCAL_STATE.accounts.length} compte(s), last_written_at=${LOCAL_STATE.last_written_at || 'absent'}.`);
     } catch (error) {
         log('ERROR', 'Gist', `Erreur chargement: ${error.message}`);
     }
@@ -358,6 +379,30 @@ async function saveToGist() {
         }
     }
 
+    // Guard: validate freshness to prevent overwriting concurrent worker writes.
+    // Fetch the remote state and compare last_written_at before committing our write.
+    try {
+        const remoteResponse = await axios.get(URLS.GITHUB_GIST(GIST_ID), {
+            headers: { 'Authorization': `token ${GH_TOKEN}` }
+        });
+        const remoteFiles = remoteResponse.data.files;
+        const remoteParsed = JSON.parse(remoteFiles[GIST_FILENAME].content);
+        const remoteTs = remoteParsed?.last_written_at;
+        const localTs = LOCAL_STATE.last_written_at;
+
+        if (remoteTs && localTs && remoteTs > localTs) {
+            log('WARN', 'Gist', `State remote plus recent (remote=${remoteTs}, local=${localTs}), rechargement et abandon de l'ecriture.`);
+            validateState(remoteParsed);
+            LOCAL_STATE = remoteParsed;
+            return;
+        }
+    } catch (freshnessErr) {
+        // Non-fatal: proceed with the write if the freshness check fails
+        log('WARN', 'Gist', `Verification fraicheur echouee, ecriture forcee: ${freshnessErr.message}`);
+    }
+
+    LOCAL_STATE.last_written_at = new Date().toISOString();
+
     try {
         await withRetry(
             () => axios.patch(URLS.GITHUB_GIST(GIST_ID), {
@@ -365,7 +410,7 @@ async function saveToGist() {
             }, { headers: { 'Authorization': `token ${GH_TOKEN}` } }),
             { context: 'Gist-Save' }
         );
-        log('INFO', 'Gist', 'State sauvegarde.');
+        log('INFO', 'Gist', `State sauvegarde (last_written_at=${LOCAL_STATE.last_written_at}).`);
     } catch (error) {
         log('ERROR', 'Gist', `Erreur sauvegarde: ${error.message}`);
         throw error;
