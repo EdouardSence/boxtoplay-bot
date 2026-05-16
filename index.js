@@ -1260,7 +1260,7 @@ client.on('interactionCreate', async interaction => {
 // ==========================================
 let isShuttingDown = false;
 
-async function gracefulShutdown(signal) {
+async function gracefulShutdown(signal, exitCode = 0) {
     if (isShuttingDown) return;
     isShuttingDown = true;
 
@@ -1290,11 +1290,11 @@ async function gracefulShutdown(signal) {
     }
 
     log('INFO', 'Shutdown', 'Arret termine.');
-    process.exit(0);
+    process.exit(exitCode);
 }
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT', 0));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM', 0));
 
 // Capture des rejections de promesses non gerees
 process.on('unhandledRejection', (reason) => {
@@ -1303,7 +1303,7 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (error) => {
     log('ERROR', 'Process', `Exception non capturee: ${error.message}`);
-    gracefulShutdown('uncaughtException');
+    gracefulShutdown('uncaughtException', 1);
 });
 
 client.login(TOKEN);
