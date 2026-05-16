@@ -817,6 +817,11 @@ async function updatePresence() {
         log('INFO', 'Presence', `Updated activity for ${account.email}: ${statusMessage}`);
     } catch (e) {
         log('WARN', 'Presence', `Erreur: ${e.message}`);
+        if (e.message.includes('Session expiree') || e.message.includes('login')) {
+            statusMessage = '🔑 Session expirée';
+        } else if (e.message.includes('HTTP 401') || e.message.includes('HTTP 403') || e.message.includes('HTTP 4')) {
+            statusMessage = '⏰ Serveur expiré';
+        }
         client.user.setActivity(statusMessage);
     }
 }
