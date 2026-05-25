@@ -963,11 +963,53 @@ client.once('clientReady', async () => {
  * Retourne null en cas d'erreur.
  */
 async function fetchMcStatus() {
+    const dnsPromises = require('dns').promises;
     try {
-        const response = await axios.get(URLS.MC_STATUS(IP_DNS), { timeout: 10000 });
+        const dnsName = `${IP_DNS}.boxtoplay.com`;
+        log('DEBUG', 'McStatus', `Resolution SRV pour _minecraft._tcp.${dnsName}...`);
+        
+        let srvRecords = [];
+        try {
+            srvRecords = await dnsPromises.resolveSrv(`_minecraft._tcp.${dnsName}`);
+        } catch (srvErr) {
+            log('WARN', 'McStatus', `Echec resolution SRV pour ${dnsName}: ${srvErr.message}`);
+        }
+
+        if (srvRecords && srvRecords.length > 0) {
+            log('INFO', 'McStatus', `${srvRecords.length} record(s) SRV trouve(s). Verification des cibles...`);
+            
+            // Verifier toutes les cibles en parallele
+            const results = await Promise.all(
+                srvRecords.map(async (record) => {
+                    const targetStr = `${record.name}:${record.port}`;
+                    try {
+                        const response = await axios.get(`https://api.mcsrvstat.us/3/${targetStr}`, { timeout: 10000 });
+                        if (response.data && response.data.online) {
+                            log('INFO', 'McStatus', `Serveur en ligne trouve sur ${targetStr}`);
+                            return response.data;
+                        }
+                    } catch (err) {
+                        log('WARN', 'McStatus', `Erreur ping cible ${targetStr}: ${err.message}`);
+                    }
+                    return null;
+                })
+            );
+
+            // Retourner le premier resultat en ligne trouvé
+            const onlineResult = results.find(r => r !== null);
+            if (onlineResult) {
+                return onlineResult;
+            }
+
+            log('WARN', 'McStatus', `Aucune cible SRV en ligne trouvee.`);
+        }
+
+        // Fallback: ping direct du hostname d'origine
+        log('INFO', 'McStatus', `Fallback: ping direct de ${dnsName}...`);
+        const response = await axios.get(`https://api.mcsrvstat.us/3/${dnsName}`, { timeout: 10000 });
         return response.data;
     } catch (error) {
-        log('WARN', 'McStatus', `Erreur API: ${error.message}`);
+        log('WARN', 'McStatus', `Erreur globale fetchMcStatus: ${error.message}`);
         return null;
     }
 }
