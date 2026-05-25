@@ -34,6 +34,13 @@ const RELEVANT_COOKIE_NAMES = [
 const SESSION_COOKIE_KEY = 'BOXTOPLAY_SESSION';
 let statusMessage = '🔴 | 👥 0 | 🧠 0.00 Go | ⚙️ 0%';
 
+// Global stats cache (refreshed via Puppeteer during KeepAlive cycles)
+let cachedStats = {
+    memoryUsage: '0',
+    cpuUsage: '0',
+    lastUpdated: 0
+};
+
 const TIMINGS = {
     CLOUDFLARE_TIMEOUT: 30000,
     CLOUDFLARE_SETTLE_DELAY: 3000,
@@ -42,7 +49,7 @@ const TIMINGS = {
     CHROME_INSTALL_TIMEOUT: 180000,
     INTER_ACCOUNT_DELAY: 3000,
     PRESENCE_INTERVAL: 60 * 1000,
-    KEEPALIVE_INTERVAL: 5 * 60 * 1000,
+    KEEPALIVE_INTERVAL: 10 * 60 * 1000, // 10 minutes to save CPU/RAM on Render
 };
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -295,6 +302,8 @@ const server = app.listen(PORT, () => log('INFO', 'Web', `Serveur Web sur le por
 // ==========================================
 let LOCAL_STATE = null;
 let GIST_FILENAME = null;
+let LOADED_STATE = null;
+let expectedLastWrittenAt = null;
 
 /**
  * Valide la structure du state charge depuis le Gist.
@@ -345,6 +354,61 @@ async function withRetry(fn, { maxRetries = 3, baseDelay = 1000, context = 'Retr
     throw lastError;
 }
 
+function mergeState(local, loaded, remote) {
+    if (!loaded) {
+        return JSON.parse(JSON.stringify(local));
+    }
+    
+    const merged = JSON.parse(JSON.stringify(remote));
+    
+    // Top-level key merge (excluding accounts and last_written_at)
+    for (const key of Object.keys(local)) {
+        if (key === 'accounts' || key === 'last_written_at') continue;
+        
+        if (JSON.stringify(local[key]) !== JSON.stringify(loaded[key])) {
+            merged[key] = JSON.parse(JSON.stringify(local[key]));
+        }
+    }
+    
+    // Merge accounts
+    if (Array.isArray(local.accounts) && Array.isArray(remote.accounts)) {
+        merged.accounts = JSON.parse(JSON.stringify(remote.accounts));
+        
+        for (let i = 0; i < local.accounts.length; i++) {
+            const localAcc = local.accounts[i];
+            const loadedAcc = loaded.accounts ? loaded.accounts[i] : null;
+            const mergedAcc = merged.accounts[i];
+            
+            if (!localAcc || !mergedAcc) continue;
+            
+            // Check top-level properties of the account
+            for (const accKey of Object.keys(localAcc)) {
+                if (accKey === 'cookies') continue;
+                
+                const loadedVal = loadedAcc ? loadedAcc[accKey] : undefined;
+                if (JSON.stringify(localAcc[accKey]) !== JSON.stringify(loadedVal)) {
+                    mergedAcc[accKey] = JSON.parse(JSON.stringify(localAcc[accKey]));
+                }
+            }
+            
+            // Check cookies dictionary
+            if (localAcc.cookies && typeof localAcc.cookies === 'object') {
+                if (!mergedAcc.cookies) mergedAcc.cookies = {};
+                const loadedCookies = loadedAcc ? loadedAcc.cookies : null;
+                
+                for (const cookieKey of Object.keys(localAcc.cookies)) {
+                    const loadedVal = loadedCookies ? loadedCookies[cookieKey] : undefined;
+                    if (localAcc.cookies[cookieKey] !== loadedVal) {
+                        mergedAcc.cookies[cookieKey] = localAcc.cookies[cookieKey];
+                    }
+                }
+            }
+        }
+    }
+    
+    return merged;
+}
+
 async function loadFromGist() {
     try {
         log('INFO', 'Gist', 'Chargement du state...');
@@ -359,6 +423,8 @@ async function loadFromGist() {
         const parsed = JSON.parse(files[GIST_FILENAME].content);
         validateState(parsed);
         LOCAL_STATE = parsed;
+        LOADED_STATE = JSON.parse(JSON.stringify(parsed));
+        expectedLastWrittenAt = parsed.last_written_at || null;
         log('INFO', 'Gist', `State charge: ${LOCAL_STATE.accounts.length} compte(s), last_written_at=${LOCAL_STATE.last_written_at || 'absent'}.`);
     } catch (error) {
         log('ERROR', 'Gist', `Erreur chargement: ${error.message}`);
@@ -379,42 +445,64 @@ async function saveToGist() {
         }
     }
 
-    // Guard: validate freshness to prevent overwriting concurrent worker writes.
-    // Fetch the remote state and compare last_written_at before committing our write.
-    try {
-        const remoteResponse = await axios.get(URLS.GITHUB_GIST(GIST_ID), {
-            headers: { 'Authorization': `token ${GH_TOKEN}` }
-        });
-        const remoteFiles = remoteResponse.data.files;
-        const remoteParsed = JSON.parse(remoteFiles[GIST_FILENAME].content);
-        const remoteTs = remoteParsed?.last_written_at;
-        const localTs = LOCAL_STATE.last_written_at;
+    const maxAttempts = 3;
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            log('INFO', 'Gist', `Tentative de sauvegarde ${attempt}/${maxAttempts}...`);
+            
+            // 1. Fetch fresh remote state
+            const remoteResponse = await axios.get(URLS.GITHUB_GIST(GIST_ID), {
+                headers: { 'Authorization': `token ${GH_TOKEN}` }
+            });
+            const remoteFiles = remoteResponse.data.files;
+            const remoteParsed = JSON.parse(remoteFiles[GIST_FILENAME].content);
+            const remoteTs = remoteParsed?.last_written_at;
 
-        if (remoteTs && localTs && remoteTs > localTs) {
-            log('WARN', 'Gist', `State remote plus recent (remote=${remoteTs}, local=${localTs}), rechargement et abandon de l'ecriture.`);
-            validateState(remoteParsed);
-            LOCAL_STATE = remoteParsed;
+            let stateToWrite = LOCAL_STATE;
+
+            // 2. Concurrency Check and Merge
+            if (remoteTs !== expectedLastWrittenAt) {
+                log('WARN', 'Gist', `Conflit detecte! Gist modifie par un tiers (remoteTs=${remoteTs || 'absent'}, expected=${expectedLastWrittenAt || 'absent'}). Fusion en cours...`);
+                stateToWrite = mergeState(LOCAL_STATE, LOADED_STATE, remoteParsed);
+                validateState(stateToWrite);
+            }
+
+            // 3. Update timestamp
+            stateToWrite.last_written_at = new Date().toISOString();
+
+            // Guard: check cookie collision on the state to write
+            if (stateToWrite.accounts.length >= 2) {
+                const s0 = stateToWrite.accounts[0]?.cookies?.[SESSION_COOKIE_KEY];
+                const s1 = stateToWrite.accounts[1]?.cookies?.[SESSION_COOKIE_KEY];
+                if (s0 && s1 && s0 === s1) {
+                    const msg = 'ALERTE CRITIQUE: Collision de cookies détectée après fusion ! Annulation de la sauvegarde Gist.';
+                    log('ERROR', 'Gist', msg);
+                    throw new Error(msg);
+                }
+            }
+
+            // 4. PATCH the Gist
+            await axios.patch(URLS.GITHUB_GIST(GIST_ID), {
+                files: { [GIST_FILENAME]: { content: JSON.stringify(stateToWrite, null, 4) } }
+            }, { headers: { 'Authorization': `token ${GH_TOKEN}` } });
+
+            // 5. Update local tracking variables on success
+            LOCAL_STATE = stateToWrite;
+            LOADED_STATE = JSON.parse(JSON.stringify(stateToWrite));
+            expectedLastWrittenAt = stateToWrite.last_written_at;
+            log('INFO', 'Gist', `State sauvegarde avec succes a la tentative ${attempt} (last_written_at=${expectedLastWrittenAt}).`);
             return;
+        } catch (error) {
+            lastError = error;
+            log('ERROR', 'Gist', `Echec de la tentative de sauvegarde ${attempt}/${maxAttempts}: ${error.message}`);
+            if (attempt < maxAttempts) {
+                const delay = 1000 * Math.pow(2, attempt - 1);
+                await new Promise(r => setTimeout(r, delay));
+            }
         }
-    } catch (freshnessErr) {
-        // Non-fatal: proceed with the write if the freshness check fails
-        log('WARN', 'Gist', `Verification fraicheur echouee, ecriture forcee: ${freshnessErr.message}`);
     }
-
-    LOCAL_STATE.last_written_at = new Date().toISOString();
-
-    try {
-        await withRetry(
-            () => axios.patch(URLS.GITHUB_GIST(GIST_ID), {
-                files: { [GIST_FILENAME]: { content: JSON.stringify(LOCAL_STATE, null, 4) } }
-            }, { headers: { 'Authorization': `token ${GH_TOKEN}` } }),
-            { context: 'Gist-Save' }
-        );
-        log('INFO', 'Gist', `State sauvegarde (last_written_at=${LOCAL_STATE.last_written_at}).`);
-    } catch (error) {
-        log('ERROR', 'Gist', `Erreur sauvegarde: ${error.message}`);
-        throw error;
-    }
+    throw lastError;
 }
 
 // ==========================================
@@ -608,34 +696,8 @@ async function checkAccount(account, index) {
         return;
     }
 
-    const serverId = account.server_id ||
-        (index === LOCAL_STATE.active_account_index ? LOCAL_STATE.current_server_id : null);
-
-    if (!serverId) {
-        log('WARN', 'KeepAlive', `Skip ${account.email} (pas de server_id)`);
-        return;
-    }
-
-    const cookieHeader = buildCookieHeader(account);
-
-    try {
-        const result = await btpApiFetch(URLS.BOXTOPLAY_STATUS(serverId), cookieHeader);
-
-        if (result.status === 200) {
-            log('INFO', 'KeepAlive', `Ping OK pour ${account.email} (status: ${result.body})`);
-            return;
-        }
-
-        if (result.status === 401 || result.status === 403) {
-            log('WARN', 'KeepAlive', `Session expiree pour ${account.email} (HTTP ${result.status}), refresh navigateur...`);
-            await refreshCookiesWithBrowser(account, index);
-            return;
-        }
-
-        log('WARN', 'KeepAlive', `Status ${result.status} pour ${account.email}`);
-    } catch (error) {
-        log('ERROR', 'KeepAlive', `Erreur ${account.email}: ${error.message}`);
-    }
+    log('INFO', 'KeepAlive', `Maintien de session et refresh cookies pour ${account.email} via navigateur...`);
+    await refreshCookiesWithBrowser(account, index);
 }
 
 async function refreshCookiesWithBrowser(account, index) {
@@ -677,8 +739,41 @@ async function refreshCookiesWithBrowser(account, index) {
             return;
         }
 
+        // Extraire et sauvegarder les cookies
         await extractAndUpdateCookies(page, index);
         log('INFO', 'KeepAlive', `Cookies rafraichis pour ${account.email}`);
+
+        // Extraire les statistiques d'utilisation du serveur actif en tâche de fond (dans le contexte browser)
+        const serverId = account.server_id ||
+            (index === LOCAL_STATE.active_account_index ? LOCAL_STATE.current_server_id : null);
+
+        if (serverId && index === LOCAL_STATE.active_account_index) {
+            try {
+                log('INFO', 'KeepAlive', `Recuperation des stats BTP pour le serveur #${serverId}...`);
+                const stats = await page.evaluate(async (urls) => {
+                    async function fetchText(url) {
+                        const response = await fetch(url, { credentials: 'include' });
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        return (await response.text()).trim();
+                    }
+                    const [mem, cpu] = await Promise.all([
+                        fetchText(urls.memory),
+                        fetchText(urls.cpu),
+                    ]);
+                    return { mem, cpu };
+                }, {
+                    memory: URLS.BOXTOPLAY_MEMORY_USAGE(serverId),
+                    cpu: URLS.BOXTOPLAY_CPU_USAGE(serverId),
+                });
+
+                cachedStats.memoryUsage = stats.mem || '0';
+                cachedStats.cpuUsage = stats.cpu || '0';
+                cachedStats.lastUpdated = Date.now();
+                log('INFO', 'KeepAlive', `Stats BTP mis a jour: RAM=${stats.mem}MB, CPU=${stats.cpu}%`);
+            } catch (statsErr) {
+                log('WARN', 'KeepAlive', `Impossible de recuperer les stats BTP: ${statsErr.message}`);
+            }
+        }
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur refresh cookies ${account.email}: ${error.message}`);
     } finally {
@@ -811,49 +906,36 @@ async function updatePresence() {
 
         const activeIndex = LOCAL_STATE.active_account_index;
         const account = LOCAL_STATE.accounts[activeIndex];
-        const cookieHeader = account?.cookies?.[SESSION_COOKIE_KEY];
         const serverId = LOCAL_STATE.current_server_id;
 
-        if (!cookieHeader || !serverId) {
-            client.user.setActivity(statusMessage);
-            return;
+        // Recuperer le statut MC via l'API publique mcsrvstat (pas de Cloudflare block)
+        const mcStatus = await fetchMcStatus();
+
+        if (!mcStatus) {
+            throw new Error('Impossible de joindre le serveur (API indisponible)');
         }
 
-        const [statusRes, playersRes, memRes, cpuRes] = await Promise.all([
-            btpApiFetch(URLS.BOXTOPLAY_STATUS(serverId), cookieHeader),
-            btpApiFetch(URLS.BOXTOPLAY_ONLINE_PLAYERS(serverId), cookieHeader),
-            btpApiFetch(URLS.BOXTOPLAY_MEMORY_USAGE(serverId), cookieHeader),
-            btpApiFetch(URLS.BOXTOPLAY_CPU_USAGE(serverId), cookieHeader),
-        ]);
+        const isOnline = mcStatus.online;
+        const onlinePlayers = mcStatus.players?.online ?? 0;
+        
+        let statusIcon = '🔴';
+        let memoryGo = 0;
+        let cpuPercent = 0;
 
-        if (statusRes.status === 401 || statusRes.status === 403) {
-            throw new Error(`Session expiree pour ${account.email} (HTTP ${statusRes.status})`);
+        if (isOnline) {
+            statusIcon = '🟢';
+            // Utiliser les statistiques BTP de RAM/CPU extraites lors du dernier KeepAlive
+            memoryGo = Number(cachedStats.memoryUsage || 0) / 1000;
+            cpuPercent = Number(cachedStats.cpuUsage || 0);
         }
 
-        const data = {
-            status: statusRes.body,
-            onlinePlayers: playersRes.body,
-            memoryUsage: memRes.body,
-            cpuUsage: cpuRes.body,
-        };
-
-        const memoryGo = Number(data.memoryUsage || 0) / 1000;
-
-        if (data.status === 'STARTED') data.status = '🟢';
-        else if (data.status === 'STOPPED') data.status = '🔴';
-        else if (data.status === 'STARTING') data.status = '🟡';
-        else data.status = '⚪';
-
-        statusMessage = `${data.status} | 👥 ${data.onlinePlayers ?? 0} | 🧠 ${memoryGo.toFixed(2)} Go | ⚙️ ${data.cpuUsage ?? 0}%`;
+        statusMessage = `${statusIcon} | 👥 ${onlinePlayers} | 🧠 ${memoryGo.toFixed(2)} Go | ⚙️ ${cpuPercent}%`;
         client.user.setActivity(statusMessage);
         log('INFO', 'Presence', `Updated activity for ${account.email}: ${statusMessage}`);
     } catch (e) {
         log('WARN', 'Presence', `Erreur: ${e.message}`);
-        if (e.message.includes('Session expiree') || e.message.includes('login')) {
-            statusMessage = '🔑 Session expirée';
-        } else if (e.message.includes('HTTP 401') || e.message.includes('HTTP 403') || e.message.includes('HTTP 4')) {
-            statusMessage = '⏰ Serveur expiré';
-        }
+        // Ne plus marquer "Session expirée" sur une simple erreur d'API publique
+        // mais conserver le dernier statut connu
         client.user.setActivity(statusMessage);
     }
 }
