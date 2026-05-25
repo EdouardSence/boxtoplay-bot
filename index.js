@@ -572,6 +572,34 @@ async function extractAndUpdateCookies(page, accountIndex) {
 let keepAliveLockTimestamp = 0;
 const KEEPALIVE_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
 const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
+
+/**
+ * Construit le header Cookie depuis le state du compte.
+ * cookies[SESSION_COOKIE_KEY] contient deja la chaine complete:
+ * "BOXTOPLAY_SESSION=abc;cf_clearance=xyz;..."
+ */
+function buildCookieHeader(account) {
+    return account.cookies?.[SESSION_COOKIE_KEY] || '';
+}
+
+/**
+ * Fetch direct vers l'API BoxToPlay sans browser.
+ * Fonctionne si cf_clearance + BOXTOPLAY_SESSION sont valides.
+ * Retourne { status, body }.
+ */
+async function btpApiFetch(url, cookieHeader) {
+    const response = await axios.get(url, {
+        headers: {
+            Cookie: cookieHeader,
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': USER_AGENT,
+            'Referer': 'https://www.boxtoplay.com/panel',
+        },
+        timeout: FETCH_TIMEOUT_MS,
+        validateStatus: null,
+    });
+    return { status: response.status, body: String(response.data ?? '').trim() };
+}
 const BROWSER_CLOSE_TIMEOUT_MS = 5000; // 5s timeout for browser.close()
 
 async function checkAccount(account, index) {
@@ -580,6 +608,37 @@ async function checkAccount(account, index) {
         return;
     }
 
+    const serverId = account.server_id ||
+        (index === LOCAL_STATE.active_account_index ? LOCAL_STATE.current_server_id : null);
+
+    if (!serverId) {
+        log('WARN', 'KeepAlive', `Skip ${account.email} (pas de server_id)`);
+        return;
+    }
+
+    const cookieHeader = buildCookieHeader(account);
+
+    try {
+        const result = await btpApiFetch(URLS.BOXTOPLAY_STATUS(serverId), cookieHeader);
+
+        if (result.status === 200) {
+            log('INFO', 'KeepAlive', `Ping OK pour ${account.email} (status: ${result.body})`);
+            return;
+        }
+
+        if (result.status === 401 || result.status === 403) {
+            log('WARN', 'KeepAlive', `Session expiree pour ${account.email} (HTTP ${result.status}), refresh navigateur...`);
+            await refreshCookiesWithBrowser(account, index);
+            return;
+        }
+
+        log('WARN', 'KeepAlive', `Status ${result.status} pour ${account.email}`);
+    } catch (error) {
+        log('ERROR', 'KeepAlive', `Erreur ${account.email}: ${error.message}`);
+    }
+}
+
+async function refreshCookiesWithBrowser(account, index) {
     let page = null;
     try {
         const browser = await getBrowser();
@@ -587,34 +646,19 @@ async function checkAccount(account, index) {
         await page.setUserAgent(USER_AGENT);
         await page.setViewport({ width: 1366, height: 768 });
 
-        // Nuke ALL cookies from the shared browser context via CDP.
-        // page.cookies(url)+deleteCookie() is scoped to a URL and misses cookies
-        // with domain `.boxtoplay.com` (dot-prefix) — those leak between accounts.
-        // Network.clearBrowserCookies has no such limitation.
         const cdpSession = await page.createCDPSession();
         await cdpSession.send('Network.clearBrowserCookies');
         await cdpSession.detach();
 
-        // Injecter les cookies AVANT de naviguer (inclut cf_clearance pour bypass Cloudflare)
         await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
 
-        // Naviguer directement vers le panel ou getStatus
-        let url = URLS.BOXTOPLAY_PANEL;
-        if (account.server_id) {
-            url = URLS.BOXTOPLAY_STATUS(account.server_id);
-        } else if (LOCAL_STATE.current_server_id && index === LOCAL_STATE.active_account_index) {
-            url = URLS.BOXTOPLAY_STATUS(LOCAL_STATE.current_server_id);
-        }
-
-        const response = await page.goto(url, {
+        await page.goto(URLS.BOXTOPLAY_PANEL, {
             waitUntil: 'networkidle2',
             timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
         });
 
-        // Si Cloudflare challenge apparait, attendre la resolution automatique
         const title = await page.title();
         if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
-            log('INFO', 'Cloudflare', `Challenge pour ${account.email}, attente resolution...`);
             try {
                 await page.waitForFunction(
                     (challengeTitle) => !document.title.includes(challengeTitle),
@@ -623,29 +667,20 @@ async function checkAccount(account, index) {
                 );
                 await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
             } catch {
-                log('ERROR', 'Cloudflare', `Challenge non resolu pour ${account.email}`);
+                log('ERROR', 'KeepAlive', `Challenge non resolu pour ${account.email}`);
                 return;
             }
         }
 
-        const status = response ? response.status() : 0;
-        const pageUrl = page.url();
-
-        // Sauvegarder les cookies mis a jour
-        await extractAndUpdateCookies(page, index);
-
-        if (pageUrl.includes('login')) {
+        if (page.url().includes('login')) {
             log('ERROR', 'KeepAlive', `SESSION EXPIREE pour ${account.email}`);
-        } else if (status === 403) {
-            log('ERROR', 'KeepAlive', `403 Forbidden pour ${account.email}`);
-        } else if (status === 200) {
-            log('INFO', 'KeepAlive', `Ping OK pour ${account.email} (${url.split('/').pop()})`);
-        } else {
-            log('WARN', 'KeepAlive', `Status ${status} pour ${account.email} (URL: ${pageUrl})`);
+            return;
         }
 
+        await extractAndUpdateCookies(page, index);
+        log('INFO', 'KeepAlive', `Cookies rafraichis pour ${account.email}`);
     } catch (error) {
-        log('ERROR', 'KeepAlive', `Erreur ${account.email}: ${error.message}`);
+        log('ERROR', 'KeepAlive', `Erreur refresh cookies ${account.email}: ${error.message}`);
     } finally {
         if (page) {
             try { await page.close(); } catch {}
@@ -784,71 +819,23 @@ async function updatePresence() {
             return;
         }
 
-        // IMPORTANT: passer par Chromium/Puppeteer (Cloudflare), pas axios direct
-        const browser = await getBrowser();
-        const page = await browser.newPage();
-        let data;
-        try {
-            await page.setUserAgent(USER_AGENT);
-            await page.setViewport({ width: 1366, height: 768 });
+        const [statusRes, playersRes, memRes, cpuRes] = await Promise.all([
+            btpApiFetch(URLS.BOXTOPLAY_STATUS(serverId), cookieHeader),
+            btpApiFetch(URLS.BOXTOPLAY_ONLINE_PLAYERS(serverId), cookieHeader),
+            btpApiFetch(URLS.BOXTOPLAY_MEMORY_USAGE(serverId), cookieHeader),
+            btpApiFetch(URLS.BOXTOPLAY_CPU_USAGE(serverId), cookieHeader),
+        ]);
 
-            const cdpSession = await page.createCDPSession();
-            await cdpSession.send('Network.clearBrowserCookies');
-            await cdpSession.detach();
-
-            await injectCookies(page, cookieHeader);
-
-            await page.goto(URLS.BOXTOPLAY_PANEL, {
-                waitUntil: 'networkidle2',
-                timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
-            });
-
-            const title = await page.title();
-            if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
-                await page.waitForFunction(
-                    (challengeTitle) => !document.title.includes(challengeTitle),
-                    { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
-                    CLOUDFLARE_CHALLENGE_TITLE
-                );
-                await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
-            }
-
-            if (page.url().includes('login')) {
-                throw new Error(`Session expiree pour ${account.email}`);
-            }
-
-            data = await page.evaluate(async (urls) => {
-                async function fetchText(url) {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 15000);
-                    try {
-                        const response = await fetch(url, { credentials: 'include', signal: controller.signal });
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status} sur ${url}`);
-                        }
-                        return (await response.text()).trim();
-                    } finally {
-                        clearTimeout(timeoutId);
-                    }
-                }
-
-                const [status, onlinePlayers, memoryUsage, cpuUsage] = await Promise.all([
-                    fetchText(urls.status),
-                    fetchText(urls.onlinePlayers),
-                    fetchText(urls.memoryUsage),
-                    fetchText(urls.cpuUsage),
-                ]);
-
-                return { status, onlinePlayers, memoryUsage, cpuUsage };
-            }, {
-                status: URLS.BOXTOPLAY_STATUS(serverId),
-                onlinePlayers: URLS.BOXTOPLAY_ONLINE_PLAYERS(serverId),
-                memoryUsage: URLS.BOXTOPLAY_MEMORY_USAGE(serverId),
-                cpuUsage: URLS.BOXTOPLAY_CPU_USAGE(serverId),
-            });
-        } finally {
-            try { await page.close(); } catch {}
+        if (statusRes.status === 401 || statusRes.status === 403) {
+            throw new Error(`Session expiree pour ${account.email} (HTTP ${statusRes.status})`);
         }
+
+        const data = {
+            status: statusRes.body,
+            onlinePlayers: playersRes.body,
+            memoryUsage: memRes.body,
+            cpuUsage: cpuRes.body,
+        };
 
         const memoryGo = Number(data.memoryUsage || 0) / 1000;
 
