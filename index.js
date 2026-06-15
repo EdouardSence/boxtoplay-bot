@@ -2,7 +2,7 @@
 // CONFIGURATION & DEPENDANCES
 // ==========================================
 require('dotenv').config();
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -97,6 +97,11 @@ const GIST_ID = process.env.GIST_ID;
 const GH_TOKEN = process.env.GH_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO;
 const IP_DNS = process.env.IP_DNS || 'orny';
+
+// Validate GIST_ID format to prevent SSRF attacks
+if (GIST_ID && !/^[a-zA-Z0-9]{20,}$/.test(GIST_ID)) {
+    throw new Error('Invalid GIST_ID format. Must be alphanumeric with minimum 20 characters.');
+}
 const STATS_LOCAL_DIR = path.join(__dirname, 'stats_cache');
 
 // ==========================================
@@ -223,10 +228,21 @@ function findChromeRecursive(dir, depth = 0) {
                         const extractTo = path.join(shellsDir, `linux-${m[1]}`);
                         log('INFO', 'Chrome', `Extraction système (unzip): ${zip}`);
                         try {
-                            const out = execSync(`unzip -o "${zipPath}" -d "${extractTo}" 2>&1`, { timeout: 60000, encoding: 'utf8' });
+                            // Use spawnSync to avoid shell injection - no shell interpretation
+                            const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractTo], { 
+                                timeout: 60000, 
+                                encoding: 'utf8',
+                                stdio: ['pipe', 'pipe', 'pipe']
+                            });
+                            if (unzipResult.error) throw unzipResult.error;
+                            const out = unzipResult.stdout || '';
                             log('INFO', 'Chrome', `unzip: ${out.slice(0, 200)}`);
-                            // Make binary executable
-                            execSync(`find "${extractTo}" -name 'chrome-headless-shell' -type f -exec chmod +x {} \\;`, { timeout: 5000 });
+                            // Make binary executable using spawnSync to avoid shell injection
+                            const findResult = spawnSync('find', [extractTo, '-name', 'chrome-headless-shell', '-type', 'f', '-exec', 'chmod', '+x', '{}', ';'], {
+                                timeout: 5000,
+                                stdio: ['pipe', 'pipe', 'pipe']
+                            });
+                            if (findResult.error) throw findResult.error;
                         } catch (uzErr) {
                             log('ERROR', 'Chrome', `unzip echoue: ${uzErr.message.slice(0, 200)}`);
                         }
@@ -661,6 +677,17 @@ let keepAliveLockTimestamp = 0;
 const KEEPALIVE_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
 const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
 
+// --- Auto-rotate sur detection offline ---
+// Filet de securite quand le cron GitHub glisse/saute et que le trial tombe
+// avant la prochaine rotation. On declenche /rotate automatiquement si le
+// serveur est offline sur plusieurs cycles consecutifs (evite les blips
+// transitoires d'une rotation legitime en cours).
+const AUTO_ROTATE_OFFLINE_STREAK = 2;             // cycles offline consecutifs avant action (~20 min)
+const AUTO_ROTATE_COOLDOWN_MS = 25 * 60 * 1000;   // pas de re-trigger pendant qu'une rotation tourne
+let offlineStreak = 0;
+let lastAutoRotateAt = 0;
+let downNotified = false; // evite de spammer la notif "serveur tombe" pendant un meme episode
+
 /**
  * Construit le header Cookie depuis le state du compte.
  * cookies[SESSION_COOKIE_KEY] contient deja la chaine complete:
@@ -843,6 +870,14 @@ async function runKeepAliveCycle() {
             }
         }
         log('INFO', 'KeepAlive', '--- Cycle termine ---');
+
+        // Filet de securite: relance la rotation si le serveur est tombe et
+        // qu'aucune rotation planifiee ne l'a releve (cron GitHub en retard/saute).
+        try {
+            await maybeAutoRotate();
+        } catch (autoErr) {
+            log('ERROR', 'AutoRotate', `Erreur maybeAutoRotate: ${autoErr.message}`);
+        }
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur cycle: ${error.message}`);
     } finally {
@@ -1069,6 +1104,84 @@ async function isWorkflowInProgress() {
     } catch (error) {
         log('WARN', 'Workflow', `Erreur verification status: ${error.message}`);
         return false;
+    }
+}
+
+/**
+ * Filet de securite: si le serveur Minecraft est offline sur plusieurs cycles
+ * consecutifs, declenche une rotation automatiquement (sans intervention humaine).
+ * Garde-fous: streak minimal (ignore blips), skip si rotation deja en cours,
+ * cooldown pour ne pas spammer pendant qu'une rotation se termine.
+ */
+/**
+ * Poste un message sur le webhook Discord si DISCORD_WEBHOOK_URL est defini.
+ * Best-effort: une erreur ici ne casse jamais le cycle keepalive.
+ */
+async function notifyWebhook(content) {
+    const url = process.env.DISCORD_WEBHOOK_URL;
+    if (!url) return;
+    try {
+        // UA navigateur obligatoire: Discord/Cloudflare renvoie 403 (code 1010)
+        // sur l'UA par defaut d'axios.
+        await axios.post(url, { content }, {
+            timeout: 10000,
+            headers: { 'User-Agent': USER_AGENT },
+        });
+    } catch (e) {
+        log('WARN', 'Webhook', `Echec notification: ${e.message}`);
+    }
+}
+
+async function maybeAutoRotate() {
+    const status = await fetchMcStatus();
+
+    // Statut indetermine (erreur reseau/DNS) -> on ne decide rien, on ne reset pas.
+    if (!status) {
+        log('WARN', 'AutoRotate', 'Statut MC indetermine, cycle ignore.');
+        return;
+    }
+
+    if (status.online) {
+        if (offlineStreak > 0) {
+            log('INFO', 'AutoRotate', 'Serveur de nouveau en ligne, streak reset.');
+            if (downNotified) await notifyWebhook('✅ Le serveur est de nouveau en ligne.');
+        }
+        offlineStreak = 0;
+        downNotified = false;
+        return;
+    }
+
+    offlineStreak++;
+    log('WARN', 'AutoRotate', `Serveur offline (streak ${offlineStreak}/${AUTO_ROTATE_OFFLINE_STREAK}).`);
+
+    if (offlineStreak < AUTO_ROTATE_OFFLINE_STREAK) return;
+
+    // Offline confirme (hors blip) -> on previent une seule fois par episode.
+    if (!downNotified) {
+        await notifyWebhook('🔴 Le serveur est tombé (hors ligne). Tentative de remise en ligne automatique...');
+        downNotified = true;
+    }
+
+    if (Date.now() - lastAutoRotateAt < AUTO_ROTATE_COOLDOWN_MS) {
+        log('INFO', 'AutoRotate', 'Cooldown actif, rotation deja declenchee recemment. Attente.');
+        return;
+    }
+
+    if (await isWorkflowInProgress()) {
+        log('INFO', 'AutoRotate', 'Rotation deja en cours cote GitHub Actions, pas de re-trigger.');
+        return;
+    }
+
+    log('WARN', 'AutoRotate', 'Seuil offline atteint -> declenchement rotation automatique.');
+    const ok = await triggerGitHubAction();
+    if (ok) {
+        lastAutoRotateAt = Date.now();
+        offlineStreak = 0;
+        log('INFO', 'AutoRotate', 'Rotation auto declenchee avec succes.');
+        await notifyWebhook('⚠️ Serveur détecté hors ligne — rotation automatique déclenchée. Retour en ligne dans ~5 min.');
+    } else {
+        log('ERROR', 'AutoRotate', 'Echec du declenchement de la rotation auto.');
+        await notifyWebhook('🔴 Serveur hors ligne et échec du déclenchement de la rotation auto. Intervention manuelle requise (`/rotate`).');
     }
 }
 
