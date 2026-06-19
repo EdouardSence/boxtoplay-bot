@@ -684,9 +684,13 @@ const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
 // transitoires d'une rotation legitime en cours).
 const AUTO_ROTATE_OFFLINE_STREAK = 2;             // cycles offline consecutifs avant action (~20 min)
 const AUTO_ROTATE_COOLDOWN_MS = 25 * 60 * 1000;   // pas de re-trigger pendant qu'une rotation tourne
+const AUTO_ROTATE_BOOT_GRACE_MS = 20 * 60 * 1000; // apres une rotation reussie, laisse le serveur booter avant de re-juger
+const AUTO_ROTATE_MAX_FAILURES = 4;               // rotations echouees d'affilee avant abandon + alerte manuelle
 let offlineStreak = 0;
 let lastAutoRotateAt = 0;
 let downNotified = false; // evite de spammer la notif "serveur tombe" pendant un meme episode
+let autoRotateFailures = 0;              // rotations auto echouees d'affilee dans l'episode courant
+let manualInterventionNotified = false;  // une fois l'abandon notifie, silence jusqu'au retour online
 
 /**
  * Construit le header Cookie depuis le state du compte.
@@ -1108,6 +1112,36 @@ async function isWorkflowInProgress() {
 }
 
 /**
+ * Recupere le dernier run du workflow de rotation (schedule.yml) pour decider
+ * de l'auto-rotate: statut (in_progress?), conclusion (success/failure?) et age.
+ * Retourne { status, conclusion, ageMs } ou null si indisponible.
+ */
+async function getLatestRotationRun() {
+    try {
+        const response = await axios.get(
+            `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/schedule.yml/runs?per_page=1`,
+            {
+                headers: {
+                    Authorization: `token ${GH_TOKEN}`,
+                    Accept: 'application/vnd.github.v3+json',
+                },
+                timeout: 10000,
+            }
+        );
+        const run = response.data?.workflow_runs?.[0];
+        if (!run) return null;
+        return {
+            status: run.status,
+            conclusion: run.conclusion,
+            ageMs: Date.now() - new Date(run.created_at).getTime(),
+        };
+    } catch (error) {
+        log('WARN', 'Workflow', `Erreur getLatestRotationRun: ${error.message}`);
+        return null;
+    }
+}
+
+/**
  * Filet de securite: si le serveur Minecraft est offline sur plusieurs cycles
  * consecutifs, declenche une rotation automatiquement (sans intervention humaine).
  * Garde-fous: streak minimal (ignore blips), skip si rotation deja en cours,
@@ -1143,11 +1177,13 @@ async function maybeAutoRotate() {
 
     if (status.online) {
         if (offlineStreak > 0) {
-            log('INFO', 'AutoRotate', 'Serveur de nouveau en ligne, streak reset.');
+            log('INFO', 'AutoRotate', 'Serveur de nouveau en ligne, etat reset.');
             if (downNotified) await notifyWebhook('✅ Le serveur est de nouveau en ligne.');
         }
         offlineStreak = 0;
         downNotified = false;
+        autoRotateFailures = 0;
+        manualInterventionNotified = false;
         return;
     }
 
@@ -1162,14 +1198,43 @@ async function maybeAutoRotate() {
         downNotified = true;
     }
 
+    // Abandon deja prononce cet episode -> silence jusqu'au retour online.
+    if (manualInterventionNotified) {
+        log('INFO', 'AutoRotate', 'Abandon deja notifie cet episode, attente retour online.');
+        return;
+    }
+
     if (Date.now() - lastAutoRotateAt < AUTO_ROTATE_COOLDOWN_MS) {
         log('INFO', 'AutoRotate', 'Cooldown actif, rotation deja declenchee recemment. Attente.');
         return;
     }
 
-    if (await isWorkflowInProgress()) {
+    const lastRun = await getLatestRotationRun();
+
+    // Une rotation tourne encore -> ne pas re-trigger.
+    if (lastRun && lastRun.status !== 'completed') {
         log('INFO', 'AutoRotate', 'Rotation deja en cours cote GitHub Actions, pas de re-trigger.');
         return;
+    }
+
+    // Grace de boot: une rotation vient de reussir, le serveur demarre peut-etre
+    // encore (le run + le boot Minecraft prennent plusieurs minutes). On attend
+    // pour ne PAS tuer un serveur fraichement cree (cause de l'incident 06-19).
+    if (lastRun && lastRun.conclusion === 'success' && lastRun.ageMs < AUTO_ROTATE_BOOT_GRACE_MS) {
+        log('INFO', 'AutoRotate', `Rotation reussie il y a ${Math.round(lastRun.ageMs / 60000)} min, serveur probablement en boot. Attente.`);
+        return;
+    }
+
+    // La derniere rotation a echoue -> on compte les echecs et on abandonne apres
+    // AUTO_ROTATE_MAX_FAILURES pour ne pas spammer ni re-declencher en boucle.
+    if (lastRun && lastRun.conclusion === 'failure') {
+        autoRotateFailures++;
+        if (autoRotateFailures >= AUTO_ROTATE_MAX_FAILURES) {
+            log('ERROR', 'AutoRotate', `${autoRotateFailures} rotations echouees d'affilee -> abandon auto.`);
+            await notifyWebhook(`🛑 ${autoRotateFailures} rotations automatiques ont échoué d'affilée. Arrêt des tentatives auto (anti-spam). Intervention manuelle requise (\`/rotate\` ou vérifier BoxToPlay).`);
+            manualInterventionNotified = true;
+            return;
+        }
     }
 
     log('WARN', 'AutoRotate', 'Seuil offline atteint -> declenchement rotation automatique.');
@@ -1181,7 +1246,13 @@ async function maybeAutoRotate() {
         await notifyWebhook('⚠️ Serveur détecté hors ligne — rotation automatique déclenchée. Retour en ligne dans ~5 min.');
     } else {
         log('ERROR', 'AutoRotate', 'Echec du declenchement de la rotation auto.');
-        await notifyWebhook('🔴 Serveur hors ligne et échec du déclenchement de la rotation auto. Intervention manuelle requise (`/rotate`).');
+        autoRotateFailures++;
+        if (autoRotateFailures >= AUTO_ROTATE_MAX_FAILURES) {
+            await notifyWebhook('🛑 Impossible de déclencher la rotation automatique (API GitHub) après plusieurs tentatives. Intervention manuelle requise (`/rotate`).');
+            manualInterventionNotified = true;
+        } else {
+            await notifyWebhook('🔴 Échec du déclenchement de la rotation auto. Nouvel essai au prochain cycle.');
+        }
     }
 }
 
