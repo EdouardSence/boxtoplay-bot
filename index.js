@@ -678,19 +678,16 @@ const KEEPALIVE_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
 const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
 
 // --- Auto-rotate sur detection offline ---
-// Filet de securite quand le cron GitHub glisse/saute et que le trial tombe
-// avant la prochaine rotation. On declenche /rotate automatiquement si le
-// serveur est offline sur plusieurs cycles consecutifs (evite les blips
-// transitoires d'une rotation legitime en cours).
-const AUTO_ROTATE_OFFLINE_STREAK = 2;             // cycles offline consecutifs avant action (~20 min)
-const AUTO_ROTATE_COOLDOWN_MS = 25 * 60 * 1000;   // pas de re-trigger pendant qu'une rotation tourne
-const AUTO_ROTATE_BOOT_GRACE_MS = 20 * 60 * 1000; // apres une rotation reussie, laisse le serveur booter avant de re-juger
-const AUTO_ROTATE_MAX_FAILURES = 4;               // rotations echouees d'affilee avant abandon + alerte manuelle
-let offlineStreak = 0;
-let lastAutoRotateAt = 0;
-let downNotified = false; // evite de spammer la notif "serveur tombe" pendant un meme episode
-let autoRotateFailures = 0;              // rotations auto echouees d'affilee dans l'episode courant
-let manualInterventionNotified = false;  // une fois l'abandon notifie, silence jusqu'au retour online
+// Rotation PROACTIVE basee sur l'age du serveur (pas reactive sur orny).
+// Le trial gratuit BTP meurt ~12h apres creation. On rotate AVANT (~10h),
+// serveur encore vivant -> transfert de monde OK, zero coupure. Espacement
+// ~10h => le slot trial de chaque compte est libere (~20h) => plus de 400.
+// Pourquoi pas reactif-sur-offline: orny accumule des SRV morts (BTP ne les
+// GC pas) -> fetchMcStatus(orny) ment "offline" -> burst de rotations ->
+// 400 + orny jamais repose -> boucle infinie (3 nuits d'outage 06-17->06-20).
+const ROTATE_AGE_MS = 10 * 60 * 60 * 1000;        // rotate quand le serveur a > 10h
+const ROTATE_RETRY_COOLDOWN_MS = 20 * 60 * 1000;  // anti-burst si un dispatch echoue
+let lastRotateDispatchAt = 0;
 
 /**
  * Construit le header Cookie depuis le state du compte.
@@ -875,12 +872,12 @@ async function runKeepAliveCycle() {
         }
         log('INFO', 'KeepAlive', '--- Cycle termine ---');
 
-        // Filet de securite: relance la rotation si le serveur est tombe et
-        // qu'aucune rotation planifiee ne l'a releve (cron GitHub en retard/saute).
+        // Rotation proactive basee sur l'age (remplace l'ancien reactif-offline
+        // qui bursté via orny). Trigger fiable: ce cycle tourne toutes les 10 min.
         try {
-            await maybeAutoRotate();
+            await maybeProactiveRotate();
         } catch (autoErr) {
-            log('ERROR', 'AutoRotate', `Erreur maybeAutoRotate: ${autoErr.message}`);
+            log('ERROR', 'Rotate', `Erreur maybeProactiveRotate: ${autoErr.message}`);
         }
     } catch (error) {
         log('ERROR', 'KeepAlive', `Erreur cycle: ${error.message}`);
@@ -1112,36 +1109,6 @@ async function isWorkflowInProgress() {
 }
 
 /**
- * Recupere le dernier run du workflow de rotation (schedule.yml) pour decider
- * de l'auto-rotate: statut (in_progress?), conclusion (success/failure?) et age.
- * Retourne { status, conclusion, ageMs } ou null si indisponible.
- */
-async function getLatestRotationRun() {
-    try {
-        const response = await axios.get(
-            `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/schedule.yml/runs?per_page=1`,
-            {
-                headers: {
-                    Authorization: `token ${GH_TOKEN}`,
-                    Accept: 'application/vnd.github.v3+json',
-                },
-                timeout: 10000,
-            }
-        );
-        const run = response.data?.workflow_runs?.[0];
-        if (!run) return null;
-        return {
-            status: run.status,
-            conclusion: run.conclusion,
-            ageMs: Date.now() - new Date(run.created_at).getTime(),
-        };
-    } catch (error) {
-        log('WARN', 'Workflow', `Erreur getLatestRotationRun: ${error.message}`);
-        return null;
-    }
-}
-
-/**
  * Filet de securite: si le serveur Minecraft est offline sur plusieurs cycles
  * consecutifs, declenche une rotation automatiquement (sans intervention humaine).
  * Garde-fous: streak minimal (ignore blips), skip si rotation deja en cours,
@@ -1166,94 +1133,38 @@ async function notifyWebhook(content) {
     }
 }
 
-async function maybeAutoRotate() {
-    const status = await fetchMcStatus();
-
-    // Statut indetermine (erreur reseau/DNS) -> on ne decide rien, on ne reset pas.
-    if (!status) {
-        log('WARN', 'AutoRotate', 'Statut MC indetermine, cycle ignore.');
+async function maybeProactiveRotate() {
+    // Rotation PROACTIVE: declenche quand le serveur actif depasse ROTATE_AGE_MS,
+    // pendant qu'il est ENCORE EN LIGNE (le worker transfere le monde -> aucune
+    // coupure). On s'ancre sur last_rotation_at (ecrit par le worker en Phase 5
+    // = ~age du serveur). Aucune dependance a orny: l'ancien code reactif-offline
+    // se faisait mentir par les SRV morts d'orny et bursté jusqu'au 400.
+    const last = LOCAL_STATE?.last_rotation_at;
+    if (!last) {
+        // Pas d'ancre encore (cold start) -> le cron GitHub couvre ce cas.
+        log('INFO', 'Rotate', 'last_rotation_at absent, rotation proactive en attente du 1er cycle worker.');
         return;
     }
 
-    if (status.online) {
-        if (offlineStreak > 0) {
-            log('INFO', 'AutoRotate', 'Serveur de nouveau en ligne, etat reset.');
-            if (downNotified) await notifyWebhook('✅ Le serveur est de nouveau en ligne.');
-        }
-        offlineStreak = 0;
-        downNotified = false;
-        autoRotateFailures = 0;
-        manualInterventionNotified = false;
+    const ageMs = Date.now() - new Date(last).getTime();
+    if (!(ageMs >= ROTATE_AGE_MS)) return; // pas encore l'heure (ou date invalide)
+
+    if (Date.now() - lastRotateDispatchAt < ROTATE_RETRY_COOLDOWN_MS) {
+        log('INFO', 'Rotate', 'Dispatch recent, attente du cooldown avant re-essai.');
         return;
     }
 
-    offlineStreak++;
-    log('WARN', 'AutoRotate', `Serveur offline (streak ${offlineStreak}/${AUTO_ROTATE_OFFLINE_STREAK}).`);
-
-    if (offlineStreak < AUTO_ROTATE_OFFLINE_STREAK) return;
-
-    // Offline confirme (hors blip) -> on previent une seule fois par episode.
-    if (!downNotified) {
-        await notifyWebhook('🔴 Le serveur est tombé (hors ligne). Tentative de remise en ligne automatique...');
-        downNotified = true;
-    }
-
-    // Abandon deja prononce cet episode -> silence jusqu'au retour online.
-    if (manualInterventionNotified) {
-        log('INFO', 'AutoRotate', 'Abandon deja notifie cet episode, attente retour online.');
+    if (await isWorkflowInProgress()) {
+        log('INFO', 'Rotate', 'Rotation deja en cours cote GitHub Actions, pas de re-trigger.');
         return;
     }
 
-    if (Date.now() - lastAutoRotateAt < AUTO_ROTATE_COOLDOWN_MS) {
-        log('INFO', 'AutoRotate', 'Cooldown actif, rotation deja declenchee recemment. Attente.');
-        return;
-    }
-
-    const lastRun = await getLatestRotationRun();
-
-    // Une rotation tourne encore -> ne pas re-trigger.
-    if (lastRun && lastRun.status !== 'completed') {
-        log('INFO', 'AutoRotate', 'Rotation deja en cours cote GitHub Actions, pas de re-trigger.');
-        return;
-    }
-
-    // Grace de boot: une rotation vient de reussir, le serveur demarre peut-etre
-    // encore (le run + le boot Minecraft prennent plusieurs minutes). On attend
-    // pour ne PAS tuer un serveur fraichement cree (cause de l'incident 06-19).
-    if (lastRun && lastRun.conclusion === 'success' && lastRun.ageMs < AUTO_ROTATE_BOOT_GRACE_MS) {
-        log('INFO', 'AutoRotate', `Rotation reussie il y a ${Math.round(lastRun.ageMs / 60000)} min, serveur probablement en boot. Attente.`);
-        return;
-    }
-
-    // La derniere rotation a echoue -> on compte les echecs et on abandonne apres
-    // AUTO_ROTATE_MAX_FAILURES pour ne pas spammer ni re-declencher en boucle.
-    if (lastRun && lastRun.conclusion === 'failure') {
-        autoRotateFailures++;
-        if (autoRotateFailures >= AUTO_ROTATE_MAX_FAILURES) {
-            log('ERROR', 'AutoRotate', `${autoRotateFailures} rotations echouees d'affilee -> abandon auto.`);
-            await notifyWebhook(`🛑 ${autoRotateFailures} rotations automatiques ont échoué d'affilée. Arrêt des tentatives auto (anti-spam). Intervention manuelle requise (\`/rotate\` ou vérifier BoxToPlay).`);
-            manualInterventionNotified = true;
-            return;
-        }
-    }
-
-    log('WARN', 'AutoRotate', 'Seuil offline atteint -> declenchement rotation automatique.');
+    log('WARN', 'Rotate', `Serveur age ${Math.round(ageMs / 3.6e6)}h (>${ROTATE_AGE_MS / 3.6e6}h) -> rotation proactive.`);
+    lastRotateDispatchAt = Date.now();
     const ok = await triggerGitHubAction();
-    if (ok) {
-        lastAutoRotateAt = Date.now();
-        offlineStreak = 0;
-        log('INFO', 'AutoRotate', 'Rotation auto declenchee avec succes.');
-        await notifyWebhook('⚠️ Serveur détecté hors ligne — rotation automatique déclenchée. Retour en ligne dans ~5 min.');
-    } else {
-        log('ERROR', 'AutoRotate', 'Echec du declenchement de la rotation auto.');
-        autoRotateFailures++;
-        if (autoRotateFailures >= AUTO_ROTATE_MAX_FAILURES) {
-            await notifyWebhook('🛑 Impossible de déclencher la rotation automatique (API GitHub) après plusieurs tentatives. Intervention manuelle requise (`/rotate`).');
-            manualInterventionNotified = true;
-        } else {
-            await notifyWebhook('🔴 Échec du déclenchement de la rotation auto. Nouvel essai au prochain cycle.');
-        }
-    }
+    await notifyWebhook(ok
+        ? '🔄 Rotation planifiée déclenchée (serveur encore en ligne, aucune coupure attendue).'
+        : '⚠️ Échec déclenchement rotation planifiée, nouvel essai au prochain cycle.');
 }
 
 // ==========================================
