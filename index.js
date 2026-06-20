@@ -899,7 +899,8 @@ const commands = [
     new SlashCommandBuilder().setName('ip').setDescription('Affiche l\'adresse IP du serveur'),
     new SlashCommandBuilder().setName('status').setDescription('Statut du serveur Minecraft (online/offline)'),
     new SlashCommandBuilder().setName('players').setDescription('Liste des joueurs connectes'),
-    new SlashCommandBuilder().setName('rotate').setDescription('Declenche la rotation via GitHub Actions'),
+    new SlashCommandBuilder().setName('rotate').setDescription('Declenche la rotation via GitHub Actions')
+        .addBooleanOption(o => o.setName('force').setDescription('Forcer meme si le serveur est jeune et en ligne')),
     new SlashCommandBuilder().setName('time').setDescription('Classement des temps de jeu des joueurs'),
 ].map(c => c.toJSON());
 
@@ -1436,10 +1437,32 @@ client.on('interactionCreate', async interaction => {
 // --- /rotate ---
     if (commandName === 'rotate') {
         await interaction.deferReply();
+        const force = interaction.options.getBoolean('force') ?? false;
+
+        // Garde-fou: bloquer une rotation manuelle inutile/dangereuse.
+        // Si le serveur est JEUNE (loin de l'expiration ~12h) ET EN LIGNE, il n'y
+        // a aucune raison de rotater: ca gache un trial et risque une
+        // double-rotation (incident 06-19). On autorise si offline (recovery),
+        // si vieux (proche expiration), ou avec force:true.
+        if (!force) {
+            const last = LOCAL_STATE?.last_rotation_at;
+            const ageH = last ? (Date.now() - new Date(last).getTime()) / 3.6e6 : null;
+            const status = await fetchMcStatus();
+            const online = !!(status && status.online);
+            if (ageH !== null && online && ageH < ROTATE_AGE_MS / 3.6e6) {
+                return interaction.editReply(
+                    `⛔ Rotation bloquée : le serveur a tourné il y a **${ageH.toFixed(1)}h** et est **en ligne** ` +
+                    `(rotation auto à ${ROTATE_AGE_MS / 3.6e6}h). La rotater maintenant gâche un trial et risque une double-rotation.\n` +
+                    `Si tu es sûr (serveur à remplacer, bug…), relance avec \`/rotate force:true\`.`
+                );
+            }
+        }
 
         const dispatched = await triggerGitHubAction();
         if (dispatched) {
-            return interaction.editReply('✅ Rotation lancee sur GitHub Actions !');
+            return interaction.editReply(force
+                ? '✅ Rotation **forcée** lancée sur GitHub Actions !'
+                : '✅ Rotation lancee sur GitHub Actions !');
         }
 
         return interaction.editReply('❌ Impossible de lancer la rotation sur GitHub Actions.');
