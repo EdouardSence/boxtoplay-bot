@@ -688,6 +688,7 @@ const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
 const ROTATE_AGE_MS = 10 * 60 * 60 * 1000;        // rotate quand le serveur a > 10h
 const ROTATE_RETRY_COOLDOWN_MS = 20 * 60 * 1000;  // anti-burst si un dispatch echoue
 let lastRotateDispatchAt = 0;
+let rotateAnnounced = false;  // 🔄 annonce UNE fois par episode (>10h), pas a chaque re-essai /20min
 
 /**
  * Construit le header Cookie depuis le state du compte.
@@ -1148,7 +1149,10 @@ async function maybeProactiveRotate() {
     }
 
     const ageMs = Date.now() - new Date(last).getTime();
-    if (!(ageMs >= ROTATE_AGE_MS)) return; // pas encore l'heure (ou date invalide)
+    if (!(ageMs >= ROTATE_AGE_MS)) {
+        rotateAnnounced = false;  // serveur frais (rotation reussie) -> reset pour le prochain episode
+        return; // pas encore l'heure (ou date invalide)
+    }
 
     if (Date.now() - lastRotateDispatchAt < ROTATE_RETRY_COOLDOWN_MS) {
         log('INFO', 'Rotate', 'Dispatch recent, attente du cooldown avant re-essai.');
@@ -1163,9 +1167,15 @@ async function maybeProactiveRotate() {
     log('WARN', 'Rotate', `Serveur age ${Math.round(ageMs / 3.6e6)}h (>${ROTATE_AGE_MS / 3.6e6}h) -> rotation proactive.`);
     lastRotateDispatchAt = Date.now();
     const ok = await triggerGitHubAction();
-    await notifyWebhook(ok
-        ? '🔄 Rotation planifiée déclenchée (serveur encore en ligne, aucune coupure attendue).'
-        : '⚠️ Échec déclenchement rotation planifiée, nouvel essai au prochain cycle.');
+    // N'annoncer qu'UNE fois par episode (age>10h): les re-essais /20min (slot trial
+    // pas encore libere -> le worker reporte proprement) ne doivent pas spammer le
+    // channel — le serveur tourne toujours, aucune coupure. Reset quand l'age retombe.
+    if (!rotateAnnounced) {
+        await notifyWebhook(ok
+            ? '🔄 Rotation planifiée déclenchée (serveur encore en ligne, aucune coupure attendue).'
+            : '⚠️ Échec déclenchement rotation planifiée, nouvel essai au prochain cycle.');
+        if (ok) rotateAnnounced = true;
+    }
 }
 
 // ==========================================
