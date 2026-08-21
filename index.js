@@ -1358,8 +1358,25 @@ client.on('interactionCreate', async interaction => {
 
     // --- /ip ---
     if (commandName === 'ip') {
+        // La zone orny accumule des SRV morts que BTP ne nettoie pas: une
+        // connexion sur deux peut tomber sur un hote eteint. fetchMcStatus()
+        // teste chaque cible SRV et ne garde que celle qui repond, donc on
+        // peut donner au joueur une adresse directe garantie joignable.
+        // Rien n'est stocke: la resoudre en live ne peut pas etre perimee,
+        // contrairement a une valeur figee dans le Gist.
+        await interaction.deferReply();
         const address = `${IP_DNS}.boxtoplay.com`;
-        return interaction.reply(`**Adresse du serveur:** \`${address}\``);
+        const data = await fetchMcStatus();
+        const lines = [`**Adresse:** \`${address}\``];
+        if (data?.online && data.hostname) {
+            lines.push(
+                `**Adresse directe (si \`${address}\` ne passe pas):** \`${data.hostname}:${data.port}\``,
+                `_Elle change a chaque rotation — garde \`${address}\` en favori._`,
+            );
+        } else {
+            lines.push('⚠️ Serveur injoignable pour le moment (rotation en cours ?), reessaie dans 2 min.');
+        }
+        return interaction.editReply(lines.join('\n'));
     }
 
     // --- /status ---
