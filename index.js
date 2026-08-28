@@ -22,38 +22,27 @@ const URLS = {
     MC_STATUS: (dns) => `https://api.mcsrvstat.us/3/${dns}.boxtoplay.com`,
 };
 
-const COOKIE_DOMAIN = 'www.boxtoplay.com';
-const RELEVANT_COOKIE_NAMES = [
-    'BOXTOPLAY_SESSION',
-    'BOXTOPLAY_LANG',
-    'cf_clearance',
-    'cookie_consent_level',
-    'cookie_consent_user_accepted',
-    'cookie_consent_user_consent_token',
-];
+// Le bot ne lit ni ne rafraichit plus les cookies: il pilote l'API REST. Mais
+// il ecrit toujours le Gist, donc il doit continuer a proteger les cookies que
+// le worker y depose (garde anti-collision de saveToGist).
 const SESSION_COOKIE_KEY = 'BOXTOPLAY_SESSION';
+
 let statusMessage = '🔴 | 👥 0 | 🧠 0.00 Go | ⚙️ 0%';
 
-// Global stats cache (refreshed via Puppeteer during KeepAlive cycles)
+// Global stats cache (refreshed from the official REST API each cycle)
 let cachedStats = {
     memoryUsage: '0',
     cpuUsage: '0',
+    trialExpiresAt: null,
     lastUpdated: 0
 };
 
 const TIMINGS = {
-    CLOUDFLARE_TIMEOUT: 30000,
-    CLOUDFLARE_SETTLE_DELAY: 3000,
-    PAGE_NAVIGATION_TIMEOUT: 30000,
-    PAGE_LOAD_TIMEOUT: 60000,
-    CHROME_INSTALL_TIMEOUT: 180000,
-    INTER_ACCOUNT_DELAY: 3000,
     PRESENCE_INTERVAL: 60 * 1000,
-    KEEPALIVE_INTERVAL: 10 * 60 * 1000, // 10 minutes to save CPU/RAM on Render
+    MONITOR_INTERVAL: 10 * 60 * 1000, // 10 minutes to save CPU/RAM on Render
 };
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const CLOUDFLARE_CHALLENGE_TITLE = 'Just a moment';
 
 // ==========================================
 // LOGGING STRUCTURE
@@ -91,6 +80,12 @@ function validateEnv() {
 
 validateEnv();
 
+// Les cles API BoxToPlay (BTP_API_KEY_0/1, une par compte du Gist) ne sont pas
+// bloquantes: sans elles le bot tourne, mais la carte de stats reste vide.
+if (!process.env.BTP_API_KEY_0 && !process.env.BTP_API_KEY && !process.env.BTP_API_KEY_1) {
+    log('WARN', 'Config', 'Aucune cle BTP_API_KEY_* : les stats serveur resteront a zero.');
+}
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GIST_ID = process.env.GIST_ID;
@@ -104,184 +99,11 @@ if (GIST_ID && !/^[a-zA-Z0-9]{20,}$/.test(GIST_ID)) {
 }
 const STATS_LOCAL_DIR = path.join(__dirname, 'stats_cache');
 
-// ==========================================
-// INSTALLATION CHROME SECURISEE
-// ==========================================
-
-const CHROME_BINARY_NAMES = ['chrome-headless-shell', 'chrome'];
-
-/**
- * Recherche recursive du binaire Chrome dans un repertoire.
- * Utilise fs.statSync pour suivre les liens symboliques.
- */
-function findChromeRecursive(dir, depth = 0) {
-    if (depth > 8) return null;
-    try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-            const fullPath = path.join(dir, entry.name);
-            if (CHROME_BINARY_NAMES.includes(entry.name)) {
-                try {
-                    // statSync follows symlinks — catches both regular files and symlinked binaries
-                    if (fs.statSync(fullPath).isFile()) return fullPath;
-                } catch { /* skip */ }
-            }
-            // Follow directories AND symlinks to directories
-            try {
-                if (fs.statSync(fullPath).isDirectory()) {
-                    const result = findChromeRecursive(fullPath, depth + 1);
-                    if (result) return result;
-                }
-            } catch { /* skip */ }
-        }
-    } catch {
-        // Ignore permission errors
-    }
-    return null;
-}
-
-(function installChrome() {
-    try {
-        function getCacheDirs() {
-            return [
-                process.env.PUPPETEER_CACHE_DIR,
-                '/tmp/puppeteer',
-                '/opt/render/.cache/puppeteer',
-                path.join(os.homedir(), '.cache', 'puppeteer'),
-            ].filter(Boolean);
-        }
-
-        function findChromeBinary() {
-            for (const dir of getCacheDirs()) {
-                if (!fs.existsSync(dir)) continue;
-                const p = findChromeRecursive(dir);
-                if (p) return p;
-            }
-            return null;
-        }
-
-        // Clean corrupted cache dirs: dir exists but no binary inside
-        for (const dir of getCacheDirs()) {
-            if (!fs.existsSync(dir)) continue;
-            if (findChromeRecursive(dir)) continue;
-            for (const sub of ['chrome-headless-shell', 'chrome']) {
-                const subdir = path.join(dir, sub);
-                if (fs.existsSync(subdir)) {
-                    log('WARN', 'Chrome', `Cache corrompu dans ${subdir}, nettoyage...`);
-                    fs.rmSync(subdir, { recursive: true, force: true });
-                }
-            }
-        }
-
-        let chromePath = findChromeBinary();
-
-        if (!chromePath) {
-            log('INFO', 'Chrome', 'Chrome non trouve, telechargement...');
-            const installEnv = { ...process.env };
-            delete installEnv.PUPPETEER_SKIP_DOWNLOAD;
-            // Prefer PUPPETEER_CACHE_DIR (set to /opt/render/.cache/puppeteer on Render)
-            // which has more disk space than /tmp. Fall back to homedir cache.
-            const CHROME_INSTALL_DIR = process.env.PUPPETEER_CACHE_DIR
-                || path.join(os.homedir(), '.cache', 'puppeteer');
-            let installOutput = '';
-            try {
-                installOutput = execSync(
-                    `npx @puppeteer/browsers install chrome-headless-shell@stable --path ${CHROME_INSTALL_DIR}`,
-                    { timeout: TIMINGS.CHROME_INSTALL_TIMEOUT, env: installEnv, encoding: 'utf8' }
-                );
-                log('INFO', 'Chrome', `Install output: ${installOutput.trim()}`);
-            } catch (installErr) {
-                log('ERROR', 'Chrome', `Install command failed: ${installErr.message}`);
-            }
-
-            // Parse last line: "chrome-headless-shell@version /path/to/dir"
-            const lines = installOutput.trim().split('\n').filter(Boolean);
-            const lastLine = lines[lines.length - 1] || '';
-            const parts = lastLine.trim().split(/\s+/);
-            if (parts.length >= 2) {
-                for (const name of CHROME_BINARY_NAMES) {
-                    const candidate = path.join(parts[parts.length - 1], name);
-                    try {
-                        if (fs.statSync(candidate).isFile()) {
-                            chromePath = candidate;
-                            log('INFO', 'Chrome', `Chrome trouve via output parse: ${chromePath}`);
-                            break;
-                        }
-                    } catch { /* skip */ }
-                }
-            }
-
-            if (!chromePath) chromePath = findChromeBinary();
-
-            // @puppeteer/browsers Node.js unzip silently fails on large binary entries.
-            // Fallback: find the downloaded zip and extract with system unzip.
-            if (!chromePath) {
-                const shellsDir = path.join(CHROME_INSTALL_DIR, 'chrome-headless-shell');
-                try {
-                    const zips = fs.existsSync(shellsDir)
-                        ? fs.readdirSync(shellsDir).filter(f => f.endsWith('.zip'))
-                        : [];
-                    for (const zip of zips) {
-                        const zipPath = path.join(shellsDir, zip);
-                        const m = zip.match(/^([\d.]+)-chrome-headless-shell/);
-                        if (!m) continue;
-                        const extractTo = path.join(shellsDir, `linux-${m[1]}`);
-                        log('INFO', 'Chrome', `Extraction système (unzip): ${zip}`);
-                        try {
-                            // Use spawnSync to avoid shell injection - no shell interpretation
-                            const unzipResult = spawnSync('unzip', ['-o', zipPath, '-d', extractTo], { 
-                                timeout: 60000, 
-                                encoding: 'utf8',
-                                stdio: ['pipe', 'pipe', 'pipe']
-                            });
-                            if (unzipResult.error) throw unzipResult.error;
-                            const out = unzipResult.stdout || '';
-                            log('INFO', 'Chrome', `unzip: ${out.slice(0, 200)}`);
-                            // Make binary executable using spawnSync to avoid shell injection
-                            const findResult = spawnSync('find', [extractTo, '-name', 'chrome-headless-shell', '-type', 'f', '-exec', 'chmod', '+x', '{}', ';'], {
-                                timeout: 5000,
-                                stdio: ['pipe', 'pipe', 'pipe']
-                            });
-                            if (findResult.error) throw findResult.error;
-                        } catch (uzErr) {
-                            log('ERROR', 'Chrome', `unzip echoue: ${uzErr.message.slice(0, 200)}`);
-                        }
-                    }
-                    chromePath = findChromeBinary();
-                } catch (fallbackErr) {
-                    log('ERROR', 'Chrome', `Fallback unzip erreur: ${fallbackErr.message}`);
-                }
-            }
-
-            // Diagnostic: show dir contents if still missing
-            if (!chromePath) {
-                try {
-                    const listing = execSync(`find "${CHROME_INSTALL_DIR}" -maxdepth 5 2>/dev/null | head -40`, { encoding: 'utf8', timeout: 5000 });
-                    log('WARN', 'Chrome', `Contenu de ${CHROME_INSTALL_DIR}:\n${listing || '(vide)'}`);
-                } catch { /* ignore */ }
-            }
-        }
-
-        if (chromePath) {
-            // Set explicitly so puppeteer.launch() finds it regardless of internal config
-            process.env.PUPPETEER_EXECUTABLE_PATH = chromePath;
-            log('INFO', 'Chrome', `Chrome pret: ${chromePath}`);
-        } else {
-            log('ERROR', 'Chrome', 'Chrome introuvable apres installation.');
-        }
-    } catch (e) {
-        log('ERROR', 'Chrome', `Erreur installation Chrome: ${e.message}`);
-    }
-})();
 
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const axios = require('axios');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const express = require('express');
 const ftp = require('basic-ftp');
-
-puppeteer.use(StealthPlugin());
 
 // ==========================================
 // 1. SERVEUR WEB (KEEP-ALIVE RENDER)
@@ -302,9 +124,9 @@ app.get('/health', (req, res) => {
             heap_total_mb: toMb(mem.heapTotal),
             external_mb: toMb(mem.external),
         },
-        chrome: BROWSER && BROWSER.connected ? 'connected' : 'disconnected',
-        keepalive_locked: keepAliveLockTimestamp > 0,
-        keepalive_lock_age_s: keepAliveLockTimestamp > 0 ? Math.floor((Date.now() - keepAliveLockTimestamp) / 1000) : null,
+        btp_api: cachedStats.lastUpdated > 0 ? 'ok' : 'unknown',
+        monitor_locked: monitorLockTimestamp > 0,
+        monitor_lock_age_s: monitorLockTimestamp > 0 ? Math.floor((Date.now() - monitorLockTimestamp) / 1000) : null,
         state_loaded: LOCAL_STATE !== null,
         accounts: LOCAL_STATE?.accounts?.length ?? null,
         active_account: LOCAL_STATE?.accounts?.[LOCAL_STATE?.active_account_index]?.email ?? null,
@@ -336,9 +158,6 @@ function validateState(state) {
         const account = state.accounts[i];
         if (!account.email || typeof account.email !== 'string') {
             throw new Error(`accounts[${i}] doit avoir un champ "email" (string)`);
-        }
-        if (!account.cookies || typeof account.cookies !== 'object') {
-            throw new Error(`accounts[${i}] doit avoir un champ "cookies" (object)`);
         }
     }
     if (typeof state.active_account_index !== 'number' || state.active_account_index < 0) {
@@ -522,160 +341,10 @@ async function saveToGist() {
 }
 
 // ==========================================
-// 3. NAVIGATEUR PERSISTANT (Puppeteer-stealth)
+// 4. SURVEILLANCE (API REST)
 // ==========================================
-// On garde UN navigateur Chrome ouvert en permanence.
-// Toutes les requetes passent par ce navigateur = meme TLS = Cloudflare OK.
-
-let BROWSER = null;
-
-async function getBrowser() {
-    if (BROWSER && BROWSER.connected) return BROWSER;
-
-    log('INFO', 'Browser', 'Lancement de Chrome stealth...');
-    BROWSER = await puppeteer.launch({
-        headless: 'new',
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-extensions',
-            '--disable-background-networking',
-            '--disable-default-apps',
-            '--disable-sync',
-            '--disable-translate',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-default-browser-check',
-        ],
-    });
-
-    // Si le navigateur crash, on le relancera au prochain appel
-    BROWSER.on('disconnected', () => {
-        log('WARN', 'Browser', 'Chrome deconnecte, sera relance au prochain cycle.');
-        BROWSER = null;
-    });
-
-    log('INFO', 'Browser', 'Chrome lance.');
-    return BROWSER;
-}
-
-/**
- * Resoudre le challenge Cloudflare en naviguant sur le site.
- * Retourne true si le challenge est passe, false sinon.
- */
-async function solveCloudflareOnPage(page) {
-    await page.setUserAgent(USER_AGENT);
-    await page.setViewport({ width: 1366, height: 768 });
-
-    log('INFO', 'Cloudflare', 'Navigation vers boxtoplay.com...');
-    await page.goto(URLS.BOXTOPLAY_LOGIN, {
-        waitUntil: 'networkidle2',
-        timeout: TIMINGS.PAGE_LOAD_TIMEOUT,
-    });
-
-    // Verifier si on a un challenge Cloudflare
-    const title = await page.title();
-    if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
-        log('INFO', 'Cloudflare', 'Challenge detecte, resolution en cours...');
-        try {
-            await page.waitForFunction(
-                (challengeTitle) => !document.title.includes(challengeTitle),
-                { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
-                CLOUDFLARE_CHALLENGE_TITLE
-            );
-        } catch {
-            log('WARN', 'Cloudflare', 'Timeout sur le challenge');
-        }
-        await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
-    }
-
-    const finalTitle = await page.title();
-    log('INFO', 'Cloudflare', `Page chargee: "${finalTitle}"`);
-    return !finalTitle.includes(CLOUDFLARE_CHALLENGE_TITLE);
-}
-
-/**
- * Injecter les cookies d'un compte dans une page.
- */
-async function injectCookies(page, cookieString) {
-    if (!cookieString) return;
-
-    const cookies = cookieString.split(';').map(c => c.trim()).filter(Boolean);
-    const cookieObjects = [];
-
-    for (const cookie of cookies) {
-        const eqIdx = cookie.indexOf('=');
-        if (eqIdx === -1) continue;
-        const name = cookie.substring(0, eqIdx).trim();
-        const value = cookie.substring(eqIdx + 1).trim();
-        if (name && value) {
-            cookieObjects.push({
-                name,
-                value,
-                domain: COOKIE_DOMAIN,
-                path: '/',
-                httpOnly: name === SESSION_COOKIE_KEY,
-                secure: true,
-            });
-        }
-    }
-
-    // Fallback: cookie brut sans format name=value
-    // On le traite comme valeur de BOXTOPLAY_SESSION pour préserver la compatibilité Gist.
-    if (cookieObjects.length === 0 && cookieString && !cookieString.includes('=')) {
-        cookieObjects.push({
-            name: SESSION_COOKIE_KEY,
-            value: cookieString.trim(),
-            domain: COOKIE_DOMAIN,
-            path: '/',
-            httpOnly: true,
-            secure: true,
-        });
-    }
-
-    if (cookieObjects.length > 0) {
-        await page.setCookie(...cookieObjects);
-    }
-}
-
-/**
- * Extraire les cookies de la page et mettre a jour l'etat.
- */
-async function extractAndUpdateCookies(page, accountIndex) {
-    const cookies = await page.cookies(`https://${COOKIE_DOMAIN}`);
-    const sessionCookie = cookies.find(c => c.name === SESSION_COOKIE_KEY);
-
-    if (sessionCookie) {
-        // Reconstruire la chaine de cookies complete (dedup par nom, derniere valeur gagne)
-        const cookieMap = new Map();
-        for (const c of cookies) {
-            if (RELEVANT_COOKIE_NAMES.includes(c.name)) {
-                cookieMap.set(c.name, c.value);
-            }
-        }
-        const relevantCookies = Array.from(cookieMap.entries())
-            .map(([name, value]) => `${name}=${value}`)
-            .join('; ');
-
-        const oldCookie = LOCAL_STATE.accounts[accountIndex].cookies[SESSION_COOKIE_KEY];
-        if (relevantCookies !== oldCookie) {
-            log('INFO', 'Cookies', `Cookies mis a jour pour ${LOCAL_STATE.accounts[accountIndex].email}`);
-            LOCAL_STATE.accounts[accountIndex].cookies[SESSION_COOKIE_KEY] = relevantCookies;
-            await saveToGist();
-        }
-    }
-}
-
-// ==========================================
-// 4. BOUCLE DE MAINTIEN (KeepAlive)
-// ==========================================
-let keepAliveLockTimestamp = 0;
-const KEEPALIVE_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
-const FETCH_TIMEOUT_MS = 15000; // 15s timeout for fetch inside page.evaluate
+let monitorLockTimestamp = 0;
+const MONITOR_LOCK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max per cycle
 
 // --- Auto-rotate sur detection offline ---
 // Rotation PROACTIVE basee sur l'age du serveur (pas reactive sur orny).
@@ -690,188 +359,76 @@ const ROTATE_RETRY_COOLDOWN_MS = 20 * 60 * 1000;  // anti-burst si un dispatch e
 let lastRotateDispatchAt = 0;
 let rotateAnnounced = false;  // 🔄 annonce UNE fois par episode (>10h), pas a chaque re-essai /20min
 
-/**
- * Construit le header Cookie depuis le state du compte.
- * cookies[SESSION_COOKIE_KEY] contient deja la chaine complete:
- * "BOXTOPLAY_SESSION=abc;cf_clearance=xyz;..."
- */
-function buildCookieHeader(account) {
-    return account.cookies?.[SESSION_COOKIE_KEY] || '';
-}
+// --- API REST officielle BoxToPlay (client dans btp.js) ----------------
+const { apiKeyFor, createBtpClient } = require('./btp');
+
+const btp = createBtpClient();
 
 /**
- * Fetch direct vers l'API BoxToPlay sans browser.
- * Fonctionne si cf_clearance + BOXTOPLAY_SESSION sont valides.
- * Retourne { status, body }.
+ * Rafraichit les stats du serveur actif via l'API.
+ *
+ * Remplace un cycle navigateur complet (injection de cookies, resolution du
+ * challenge Cloudflare, deux fetch dans la page) par un appel: /metrics rend
+ * CPU, RAM et joueurs d'un coup.
  */
-async function btpApiFetch(url, cookieHeader) {
-    const response = await axios.get(url, {
-        headers: {
-            Cookie: cookieHeader,
-            'X-Requested-With': 'XMLHttpRequest',
-            'User-Agent': USER_AGENT,
-            'Referer': 'https://www.boxtoplay.com/panel',
-        },
-        timeout: FETCH_TIMEOUT_MS,
-        validateStatus: null,
-    });
-    return { status: response.status, body: String(response.data ?? '').trim() };
-}
-const BROWSER_CLOSE_TIMEOUT_MS = 5000; // 5s timeout for browser.close()
+async function refreshServerStats(account, index) {
+    if (index !== LOCAL_STATE.active_account_index) {
+        return; // seul le serveur live alimente la presence Discord
+    }
 
-async function checkAccount(account, index) {
-    if (!account.cookies[SESSION_COOKIE_KEY]) {
-        log('WARN', 'KeepAlive', `Skip ${account.email} (pas de cookie de session)`);
+    const apiKey = apiKeyFor(account, index);
+    if (!apiKey) {
+        log('WARN', 'Monitor', `Pas de cle API pour ${account.email} (BTP_API_KEY_${index}).`);
         return;
     }
 
-    log('INFO', 'KeepAlive', `Maintien de session et refresh cookies pour ${account.email} via navigateur...`);
-    await refreshCookiesWithBrowser(account, index);
-}
-
-async function refreshCookiesWithBrowser(account, index) {
-    let page = null;
-    try {
-        const browser = await getBrowser();
-        page = await browser.newPage();
-        await page.setUserAgent(USER_AGENT);
-        await page.setViewport({ width: 1366, height: 768 });
-
-        const cdpSession = await page.createCDPSession();
-        await cdpSession.send('Network.clearBrowserCookies');
-        await cdpSession.detach();
-
-        await injectCookies(page, account.cookies[SESSION_COOKIE_KEY]);
-
-        await page.goto(URLS.BOXTOPLAY_PANEL, {
-            waitUntil: 'networkidle2',
-            timeout: TIMINGS.PAGE_NAVIGATION_TIMEOUT,
-        });
-
-        const title = await page.title();
-        if (title.includes(CLOUDFLARE_CHALLENGE_TITLE)) {
-            try {
-                await page.waitForFunction(
-                    (challengeTitle) => !document.title.includes(challengeTitle),
-                    { timeout: TIMINGS.CLOUDFLARE_TIMEOUT },
-                    CLOUDFLARE_CHALLENGE_TITLE
-                );
-                await new Promise(r => setTimeout(r, TIMINGS.CLOUDFLARE_SETTLE_DELAY));
-            } catch {
-                log('ERROR', 'KeepAlive', `Challenge non resolu pour ${account.email}`);
-                return;
-            }
-        }
-
-        if (page.url().includes('login')) {
-            log('ERROR', 'KeepAlive', `SESSION EXPIREE pour ${account.email}`);
-            return;
-        }
-
-        // Extraire et sauvegarder les cookies
-        await extractAndUpdateCookies(page, index);
-        log('INFO', 'KeepAlive', `Cookies rafraichis pour ${account.email}`);
-
-        // Extraire les statistiques d'utilisation du serveur actif en tâche de fond (dans le contexte browser)
-        const serverId = account.server_id ||
-            (index === LOCAL_STATE.active_account_index ? LOCAL_STATE.current_server_id : null);
-
-        if (serverId && index === LOCAL_STATE.active_account_index) {
-            try {
-                log('INFO', 'KeepAlive', `Recuperation des stats BTP pour le serveur #${serverId}...`);
-                const stats = await page.evaluate(async (urls) => {
-                    async function fetchText(url) {
-                        const response = await fetch(url, { credentials: 'include' });
-                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                        return (await response.text()).trim();
-                    }
-                    const [mem, cpu] = await Promise.all([
-                        fetchText(urls.memory),
-                        fetchText(urls.cpu),
-                    ]);
-                    return { mem, cpu };
-                }, {
-                    memory: URLS.BOXTOPLAY_MEMORY_USAGE(serverId),
-                    cpu: URLS.BOXTOPLAY_CPU_USAGE(serverId),
-                });
-
-                cachedStats.memoryUsage = stats.mem || '0';
-                cachedStats.cpuUsage = stats.cpu || '0';
-                cachedStats.lastUpdated = Date.now();
-                log('INFO', 'KeepAlive', `Stats BTP mis a jour: RAM=${stats.mem}MB, CPU=${stats.cpu}%`);
-            } catch (statsErr) {
-                log('WARN', 'KeepAlive', `Impossible de recuperer les stats BTP: ${statsErr.message}`);
-            }
-        }
-    } catch (error) {
-        log('ERROR', 'KeepAlive', `Erreur refresh cookies ${account.email}: ${error.message}`);
-    } finally {
-        if (page) {
-            try { await page.close(); } catch {}
-        }
-    }
-}
-
-/**
- * Wrapper non-bloquant pour BROWSER.close() avec timeout.
- * Force la liberation si close() bloque plus de 5 secondes.
- */
-async function closeBrowserWithTimeout() {
-    if (!BROWSER || !BROWSER.connected) {
-        BROWSER = null;
+    const panelId = account.server_id || LOCAL_STATE.current_server_id;
+    const service = await btp.resolveService(apiKey, panelId);
+    if (!service) {
+        log('WARN', 'Monitor', `Serveur #${panelId} absent du compte ${account.email}.`);
         return;
     }
 
-    try {
-        await Promise.race([
-            BROWSER.close(),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Browser close timeout')), BROWSER_CLOSE_TIMEOUT_MS)
-            ),
-        ]);
-        log('INFO', 'Browser', 'Chrome ferme (fin de cycle).');
-    } catch (e) {
-        log('WARN', 'Browser', `Timeout ou erreur close(): ${e.message}, force nullification.`);
-    } finally {
-        BROWSER = null;
-    }
+    const metrics = await btp.fetchMetrics(apiKey, service.id);
+    cachedStats.memoryUsage = String(metrics.memory_usage_mb ?? 0);
+    cachedStats.cpuUsage = String(metrics.cpu_usage_percent ?? 0);
+    cachedStats.trialExpiresAt = service.expiresAt;
+    cachedStats.lastUpdated = Date.now();
+    log('INFO', 'Monitor', `Stats #${panelId}: RAM=${cachedStats.memoryUsage}MB, `
+        + `CPU=${cachedStats.cpuUsage}%, essai jusqu'a ${service.expiresAt}`);
 }
 
-async function runKeepAliveCycle() {
+async function runMonitorCycle() {
     // Anti-deadlock: detecter si un cycle precede est bloque depuis plus de 10 minutes
-    if (keepAliveLockTimestamp > 0 && Date.now() - keepAliveLockTimestamp > KEEPALIVE_LOCK_TIMEOUT_MS) {
-        log('WARN', 'KeepAlive', 'Verrou bloque depuis >10min, force reinitialisation.');
-        keepAliveLockTimestamp = 0;
-        if (BROWSER && BROWSER.connected) {
-            try { BROWSER.close(); } catch {}
-        }
-        BROWSER = null;
+    if (monitorLockTimestamp > 0 && Date.now() - monitorLockTimestamp > MONITOR_LOCK_TIMEOUT_MS) {
+        log('WARN', 'Monitor', 'Verrou bloque depuis >10min, force reinitialisation.');
+        monitorLockTimestamp = 0;
     }
 
     // Protection contre le chevauchement des cycles (verrou simple)
-    if (keepAliveLockTimestamp > 0) {
-        log('WARN', 'KeepAlive', 'Cycle precedent encore en cours, skip.');
+    if (monitorLockTimestamp > 0) {
+        log('WARN', 'Monitor', 'Cycle precedent encore en cours, skip.');
         return;
     }
 
-    keepAliveLockTimestamp = Date.now();
+    monitorLockTimestamp = Date.now();
     try {
         // Recharger le state depuis le Gist pour integrer les changements du worker
         await loadFromGist();
 
         if (!LOCAL_STATE) {
-            log('WARN', 'KeepAlive', 'State non charge, cycle ignore.');
+            log('WARN', 'Monitor', 'State non charge, cycle ignore.');
             return;
         }
 
-        log('INFO', 'KeepAlive', `--- Cycle KeepAlive (${LOCAL_STATE.accounts.length} comptes) ---`);
-        for (let i = 0; i < LOCAL_STATE.accounts.length; i++) {
-            await checkAccount(LOCAL_STATE.accounts[i], i);
-            if (i < LOCAL_STATE.accounts.length - 1) {
-                await new Promise(r => setTimeout(r, TIMINGS.INTER_ACCOUNT_DELAY));
-            }
+        // Un seul compte porte le serveur live: parcourir les deux n'avait de
+        // sens que pour rafraichir deux sessions navigateur.
+        const activeIndex = LOCAL_STATE.active_account_index;
+        try {
+            await refreshServerStats(LOCAL_STATE.accounts[activeIndex], activeIndex);
+        } catch (statsErr) {
+            log('WARN', 'Monitor', `Stats compte actif: ${statsErr.message}`);
         }
-        log('INFO', 'KeepAlive', '--- Cycle termine ---');
 
         // Rotation proactive basee sur l'age (remplace l'ancien reactif-offline
         // qui bursté via orny). Trigger fiable: ce cycle tourne toutes les 10 min.
@@ -881,12 +438,9 @@ async function runKeepAliveCycle() {
             log('ERROR', 'Rotate', `Erreur maybeProactiveRotate: ${autoErr.message}`);
         }
     } catch (error) {
-        log('ERROR', 'KeepAlive', `Erreur cycle: ${error.message}`);
+        log('ERROR', 'Monitor', `Erreur cycle: ${error.message}`);
     } finally {
-        // Fermer Chrome apres chaque cycle pour liberer la memoire (Render free = 512MB)
-        // getBrowser() le relancera au prochain cycle
-        await closeBrowserWithTimeout();
-        keepAliveLockTimestamp = 0;
+        monitorLockTimestamp = 0;
     }
 }
 
@@ -915,13 +469,9 @@ const rest = new REST({ version: '10' }).setToken(TOKEN);
 async function updatePresence() {
     try {
         // Anti-deadlock: verifier si le cycle keepalive est bloque
-        if (keepAliveLockTimestamp > 0 && Date.now() - keepAliveLockTimestamp > KEEPALIVE_LOCK_TIMEOUT_MS) {
-            log('WARN', 'Presence', 'Verrou bloque dans updatePresence, reset et reinitialisation.');
-            keepAliveLockTimestamp = 0;
-            if (BROWSER && BROWSER.connected) {
-                try { BROWSER.close(); } catch {}
-                BROWSER = null;
-            }
+        if (monitorLockTimestamp > 0 && Date.now() - monitorLockTimestamp > MONITOR_LOCK_TIMEOUT_MS) {
+            log('WARN', 'Presence', 'Verrou bloque dans updatePresence, reinitialisation.');
+            monitorLockTimestamp = 0;
         }
 
         // Verifier si une rotation est en cours
@@ -932,7 +482,7 @@ async function updatePresence() {
         }
 
         // Eviter la concurrence avec le cycle keepalive (verrou timestamp)
-        if (keepAliveLockTimestamp > 0) {
+        if (monitorLockTimestamp > 0) {
             client.user.setActivity(statusMessage);
             return;
         }
@@ -962,7 +512,7 @@ async function updatePresence() {
 
         if (isOnline) {
             statusIcon = '🟢';
-            // Utiliser les statistiques BTP de RAM/CPU extraites lors du dernier KeepAlive
+            // Utiliser les statistiques BTP de RAM/CPU extraites lors du dernier cycle de surveillance
             memoryGo = Number(cachedStats.memoryUsage || 0) / 1000;
             cpuPercent = Number(cachedStats.cpuUsage || 0);
         }
@@ -983,17 +533,17 @@ client.once('clientReady', async () => {
     await loadFromGist();
 
     // Premier cycle immediat (avec gestion d'erreur)
-    runKeepAliveCycle().catch(err => {
-        log('ERROR', 'KeepAlive', `Erreur cycle initial: ${err.message}`);
+    runMonitorCycle().catch(err => {
+        log('ERROR', 'Monitor', `Erreur cycle initial: ${err.message}`);
     });
 
     // Intervalles avec gestion d'erreur sur chaque tick
     setInterval(updatePresence, TIMINGS.PRESENCE_INTERVAL);
     setInterval(() => {
-        runKeepAliveCycle().catch(err => {
-            log('ERROR', 'KeepAlive', `Erreur cycle periodique: ${err.message}`);
+        runMonitorCycle().catch(err => {
+            log('ERROR', 'Monitor', `Erreur cycle periodique: ${err.message}`);
         });
-    }, TIMINGS.KEEPALIVE_INTERVAL);
+    }, TIMINGS.MONITOR_INTERVAL);
 });
 
 /**
@@ -1435,7 +985,9 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
 
         const active = LOCAL_STATE.accounts[LOCAL_STATE.active_account_index];
-        const browserStatus = BROWSER && BROWSER.connected ? 'Actif' : 'Inactif';
+        const trialLeft = cachedStats.trialExpiresAt
+            ? `${Math.max(0, Math.round((new Date(cachedStats.trialExpiresAt).getTime() - Date.now()) / 60000))} min`
+            : 'inconnu';
         const modpack = LOCAL_STATE.modpack || 'non defini';
         const serverId = LOCAL_STATE.current_server_id || 'inconnu';
         const address = `${IP_DNS}.boxtoplay.com`;
@@ -1455,7 +1007,7 @@ client.on('interactionCreate', async interaction => {
             ``,
             `**Bot**`,
             `Compte actif: ${active.email}`,
-            `Chrome: ${browserStatus}`,
+            `Essai restant: ${trialLeft}`,
         ];
 
         return interaction.editReply(lines.join('\n'));
@@ -1577,15 +1129,6 @@ async function gracefulShutdown(signal, exitCode = 0) {
         log('INFO', 'Shutdown', 'Client Discord deconnecte.');
     } catch (e) {
         log('WARN', 'Shutdown', `Erreur deconnexion Discord: ${e.message}`);
-    }
-
-    try {
-        if (BROWSER && BROWSER.connected) {
-            await BROWSER.close();
-            log('INFO', 'Shutdown', 'Chrome ferme.');
-        }
-    } catch (e) {
-        log('WARN', 'Shutdown', `Erreur fermeture Chrome: ${e.message}`);
     }
 
     try {
